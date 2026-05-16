@@ -1,4 +1,4 @@
-# KuCoin Lane — Lane 4
+# KuCoin Lane — Trading Lane
 
 ## Identity
 KuCoin margin trading bot. Autonomous, self-healing, self-upgrading.
