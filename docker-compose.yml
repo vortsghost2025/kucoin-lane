@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  kucoin-lane:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kucoin-lane
+    restart: unless-stopped
+    env_file:
+      - config/.env
+    environment:
+      - EXECUTION_MODE=${EXECUTION_MODE:-dry_run}
+      - CYCLE_INTERVAL=${CYCLE_INTERVAL:-60}
+      - KUCOIN_API_KEY=${KUCOIN_API_KEY}
+      - KUCOIN_API_SECRET=${KUCOIN_API_SECRET}
+      - KUCOIN_API_PASSPHRASE=${KUCOIN_API_PASSPHRASE}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - ./state:/app/state
+      - ./logs:/app/logs
+      - ./config/coin_parameters.json:/app/config/coin_parameters.json:ro
+      - ../Archivist-Agent/lanes/kucoin:/app/lanes/kucoin
+    ports:
+      - "8084:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os; exit(0 if os.path.exists('/app/src/execution/execution_engine.py') else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"

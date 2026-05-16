@@ -1,0 +1,54 @@
+# Environment variables (CONTAINS SECRETS)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# State files
+bot_state.json
+bot_heartbeat.json
+shutdown_state.json
+SESSION_STATE.json
+portfolio_cb_state.json
+checkpoint.pkl
+
+# Logs
+logs/
+*.log
+
+# Position locks
+position_locks/
+
+# State backups
+state_backups/
+
+# Data (output only, not src/data/ package)
+/data/
+mlruns/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Docker
+*.pid
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/

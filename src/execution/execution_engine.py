@@ -1,0 +1,738 @@
+"""
+Execution Engine - Merged from kucoin-margin-bot + Deliberate-AI-Ensemble
+=========================================================================
+
+Bot contributed:
+- ABC ExecutionEngine base with heartbeat, continuous loop, Telegram notifications
+- DryRunExecutor: CSV backtest data loading
+- LiveExecutor: KuCoin client init, risk checks, position monitoring at startup
+- select_executor() factory
+
+Ensemble contributed:
+- ExecutionAgent(BaseAgent): paper position tracking, close_position,
+  update_open_positions, get_performance_summary
+- Live order placement via ExchangeAdapter (KuCoin-specific symbol formatting,
+  market/limit orders, stop-loss, take-profit)
+- Session limits validation, live trade validation
+- TradeStatus enum
+"""
+
+import json
+import logging
+import os
+import time
+from abc import ABC, abstractmethod
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from ..base_agent import BaseAgent, AgentStatus
+from ..config import (
+    KUCOIN_API_KEY,
+    KUCOIN_API_SECRET,
+    KUCOIN_API_PASSPHRASE,
+    POSITION_SIZE_USD,
+    MONITOR_INTERVAL_MIN,
+    DRY_RUN,
+    LIVE_TRADING,
+)
+from .exchange_adapter import ExchangeAdapter, KuCoinAdapter
+
+logger = logging.getLogger(__name__)
+
+
+def send_telegram_notification(message: str) -> bool:
+    try:
+        import requests
+
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        if not token or not chat_id:
+            return False
+
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
+        response = requests.post(url, json=payload, timeout=10)
+        return response.status_code == 200
+    except Exception as e:
+        logger.warning(f"Failed to send Telegram notification: {e}")
+        return False
+
+
+class TradeStatus(Enum):
+    OPEN = "open"
+    CLOSED = "closed"
+    PENDING = "pending"
+    CANCELLED = "cancelled"
+
+
+class ExecutionEngine(ABC):
+    """Base class for execution engines with heartbeat and continuous loop."""
+
+    def __init__(self, config: Dict[str, Any]):
+        self.config = config
+        mode_suffix = "dry_run" if "DryRun" in self.__class__.__name__ else "live"
+        self.heartbeat_file = f"bot_heartbeat_{mode_suffix}.json"
+        self.start_time = datetime.now()
+        self.cycle_count = 0
+        self.is_running = True
+        self.open_positions: List[Dict[str, Any]] = []
+        self.closed_trades: List[Dict[str, Any]] = []
+        self.total_trades = 0
+        self.winning_trades = 0
+        self.losing_trades = 0
+        logger.info(
+            f"ExecutionEngine initialized - using heartbeat: {self.heartbeat_file}"
+        )
+
+    def write_heartbeat(self, status: str = "running", step: str = "main_loop"):
+        try:
+            heartbeat = {
+                "timestamp": datetime.now().isoformat(),
+                "pid": os.getpid(),
+                "status": status,
+                "step": step,
+                "cycle": self.cycle_count,
+                "mode": self.__class__.__name__,
+                "uptime_seconds": (datetime.now() - self.start_time).total_seconds(),
+            }
+            with open(self.heartbeat_file, "w", encoding="utf-8") as f:
+                json.dump(heartbeat, f)
+        except Exception as e:
+            logger.warning(f"Failed to write heartbeat: {e}")
+
+    def log(self, level: str, msg: str):
+        getattr(logger, level.lower())(f"[{self.__class__.__name__}] {msg}")
+
+    @abstractmethod
+    def run_cycle(self):
+        pass
+
+    def run_continuous(self, interval_minutes: int = 5):
+        self.log(
+            "info",
+            f"Starting continuous monitoring loop (every {interval_minutes} minutes)",
+        )
+        self.write_heartbeat("initializing", "startup")
+
+        mode_name = "LIVE_TRADING" if "Live" in self.__class__.__name__ else "DRY_RUN"
+        start_msg = (
+            f"<b>Bot Started ({mode_name})</b>\n"
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Mode: {mode_name}\n"
+            f"Interval: {interval_minutes} minutes"
+        )
+        send_telegram_notification(start_msg)
+
+        if "Live" in self.__class__.__name__:
+            self._check_existing_positions_at_startup()
+
+        try:
+            while self.is_running:
+                try:
+                    self.cycle_count += 1
+                    self.log("info", f"=== CYCLE {self.cycle_count} START ===")
+                    self.write_heartbeat("running", "pre_cycle")
+                    self.run_cycle()
+                    self.log("info", f"=== CYCLE {self.cycle_count} COMPLETE ===")
+                    self.write_heartbeat("running", "post_cycle")
+                except Exception as e:
+                    self.log("error", f"Cycle error: {str(e)}")
+                    self.write_heartbeat("error", type(e).__name__)
+
+                sleep_seconds = interval_minutes * 60
+                self.log("info", f"Sleeping {interval_minutes}m until next cycle...")
+                for i in range(0, sleep_seconds, 10):
+                    if not self.is_running:
+                        break
+                    time.sleep(min(10, sleep_seconds - i))
+                    self.write_heartbeat("sleeping", f"interval_{i}s")
+
+        except KeyboardInterrupt:
+            self.log("info", "Keyboard interrupt received")
+        finally:
+            self.shutdown()
+
+    def shutdown(self):
+        self.log("info", "Shutting down execution engine")
+        self.is_running = False
+        self.write_heartbeat("shutdown", "final")
+
+        mode_name = "LIVE_TRADING" if "Live" in self.__class__.__name__ else "DRY_RUN"
+        uptime_seconds = (datetime.now() - self.start_time).total_seconds()
+        uptime_str = (
+            f"{int(uptime_seconds // 3600)}h {int((uptime_seconds % 3600) // 60)}m"
+            if uptime_seconds > 60
+            else f"{int(uptime_seconds)}s"
+        )
+        stop_msg = (
+            f"<b>Bot Stopped ({mode_name})</b>\n"
+            f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"Uptime: {uptime_str}\n"
+            f"Completed {self.cycle_count} cycles"
+        )
+        send_telegram_notification(stop_msg)
+
+    def _check_existing_positions_at_startup(self):
+        pass
+
+    def _get_total_pnl(self) -> float:
+        return sum(t["pnl"] for t in self.closed_trades)
+
+    def close_position(
+        self, trade_id: int, exit_price: float, reason: str
+    ) -> Dict[str, Any]:
+        trade = None
+        for i, t in enumerate(self.open_positions):
+            if t["trade_id"] == trade_id:
+                trade = self.open_positions.pop(i)
+                break
+
+        if not trade:
+            self.log("warning", f"Trade {trade_id} not found")
+            return {}
+
+        pnl = (exit_price - trade["entry_price"]) * trade["position_size"]
+        pnl_pct = (exit_price - trade["entry_price"]) / trade["entry_price"] * 100
+
+        trade["exit_price"] = exit_price
+        trade["exit_time"] = datetime.utcnow().isoformat()
+        trade["exit_reason"] = reason
+        trade["status"] = TradeStatus.CLOSED.value
+        trade["pnl"] = pnl
+        trade["pnl_pct"] = pnl_pct
+
+        self.closed_trades.append(trade)
+
+        if pnl > 0:
+            self.winning_trades += 1
+        else:
+            self.losing_trades += 1
+
+        self.log(
+            "info",
+            f"Trade {trade_id} CLOSED via {reason}: P&L: ${pnl:.2f} ({pnl_pct:+.2f}%)",
+        )
+        return trade
+
+    def update_open_positions(
+        self, current_prices: Dict[str, float]
+    ) -> List[Dict[str, Any]]:
+        closed_trades = []
+        trades_to_close = []
+
+        for trade in self.open_positions:
+            pair = trade["pair"]
+            if pair not in current_prices:
+                continue
+
+            current_price = current_prices[pair]
+            pnl = (current_price - trade["entry_price"]) * trade["position_size"]
+            pnl_pct = (
+                (current_price - trade["entry_price"]) / trade["entry_price"] * 100
+            )
+            trade["pnl"] = pnl
+            trade["pnl_pct"] = pnl_pct
+
+            if current_price <= trade["stop_loss"]:
+                trades_to_close.append((trade["trade_id"], current_price, "stop_loss"))
+            elif current_price >= trade["take_profit"]:
+                trades_to_close.append(
+                    (trade["trade_id"], current_price, "take_profit")
+                )
+
+        for trade_id, exit_price, reason in trades_to_close:
+            closed = self.close_position(trade_id, exit_price, reason)
+            closed_trades.append(closed)
+
+        return closed_trades
+
+    def get_performance_summary(self) -> Dict[str, Any]:
+        if self.total_trades == 0:
+            return {
+                "total_trades": 0,
+                "winning_trades": 0,
+                "losing_trades": 0,
+                "win_rate": 0,
+                "total_pnl": 0,
+                "avg_pnl": 0,
+                "open_positions": 0,
+                "max_win": 0,
+                "max_loss": 0,
+            }
+
+        total_pnl = sum(t["pnl"] for t in self.closed_trades)
+        max_win = max((t["pnl"] for t in self.closed_trades), default=0)
+        max_loss = min((t["pnl"] for t in self.closed_trades), default=0)
+
+        return {
+            "total_trades": self.total_trades,
+            "winning_trades": self.winning_trades,
+            "losing_trades": self.losing_trades,
+            "win_rate": self.winning_trades / self.total_trades
+            if self.total_trades > 0
+            else 0,
+            "total_pnl": total_pnl,
+            "avg_pnl": total_pnl / self.total_trades if self.total_trades > 0 else 0,
+            "open_positions": len(self.open_positions),
+            "max_win": max_win,
+            "max_loss": max_loss,
+        }
+
+    def get_open_positions(self) -> List[Dict[str, Any]]:
+        return self.open_positions.copy()
+
+    def get_trade_history(self) -> List[Dict[str, Any]]:
+        return self.closed_trades.copy()
+
+
+class DryRunExecutor(ExecutionEngine):
+    """
+    DRY_RUN MODE: COMPLETELY ISOLATED
+    - Uses cached/historical OHLCV data
+    - NO API calls to KuCoin
+    - NO real orders placed
+    - Pure backtesting engine
+    """
+
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.log("info", "DRY_RUN mode: Backtesting only")
+        self.paper_trading = True
+        self.max_open_positions = config.get("max_open_positions", 1)
+        self.max_trades_per_session = config.get("max_trades_per_session", 2)
+        self.load_backtest_data()
+
+    def load_backtest_data(self):
+        self.log("info", "Loading backtest data from CSV files...")
+        self.backtest_data = {}
+
+        csv_files = [f for f in os.listdir(".") if f.endswith("_ohlcv.csv")]
+        for csv_file in csv_files:
+            symbol = csv_file.replace("_ohlcv.csv", "")
+            try:
+                import pandas as pd
+
+                df = pd.read_csv(csv_file)
+                self.backtest_data[symbol] = df
+                self.log("info", f"Loaded {symbol}: {len(df)} candles")
+            except Exception as e:
+                self.log("warning", f"Failed to load {csv_file}: {e}")
+
+    def run_cycle(self):
+        self.log("info", "Running backtest strategy analysis on cached OHLCV data...")
+        self.log(
+            "info",
+            f"Backtest cycle {self.cycle_count} complete - 0 trades executed",
+        )
+
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        market_data = input_data.get("market_data", {})
+        position_size = input_data.get("position_size", 0)
+        stop_loss = input_data.get("stop_loss", 0)
+        take_profit = input_data.get("take_profit", 0)
+
+        if not market_data or position_size <= 0:
+            return {
+                "agent": "DryRunExecutor",
+                "action": "execute_trade",
+                "success": True,
+                "data": {"trade_executed": False, "reason": "Invalid position size"},
+            }
+
+        pair = list(market_data.keys())[0]
+        market_info = market_data[pair]
+        entry_price = market_info.get("current_price", 0)
+
+        trade = {
+            "trade_id": self.total_trades + 1,
+            "pair": pair,
+            "entry_price": entry_price,
+            "position_size": position_size,
+            "entry_value": entry_price * position_size,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "entry_time": datetime.utcnow().isoformat(),
+            "status": TradeStatus.OPEN.value,
+            "paper_trading": True,
+            "pnl": 0,
+            "pnl_pct": 0,
+            "exit_price": None,
+            "exit_time": None,
+            "exit_reason": None,
+            "order_id": None,
+            "stop_order_id": None,
+            "tp_order_id": None,
+        }
+
+        self.open_positions.append(trade)
+        self.total_trades += 1
+
+        self.log(
+            "info",
+            f"Trade {trade['trade_id']} [PAPER] OPENED: "
+            f"{pair} @ {entry_price:.4f} | Size: {position_size:.4f} | "
+            f"SL: {stop_loss:.4f} | TP: {take_profit:.4f}",
+        )
+
+        return {
+            "agent": "DryRunExecutor",
+            "action": "execute_trade",
+            "success": True,
+            "data": {
+                "trade_executed": True,
+                "trade_id": trade["trade_id"],
+                "pair": pair,
+                "entry_price": entry_price,
+                "position_size": position_size,
+                "entry_value": trade["entry_value"],
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "paper_trading": True,
+                "open_positions_count": len(self.open_positions),
+            },
+        }
+
+
+class LiveExecutor(ExecutionEngine):
+    """
+    LIVE_TRADING MODE: COMPLETELY ISOLATED
+    - Real API calls via ExchangeAdapter
+    - Real orders placed on account
+    - LIVE MONEY AT RISK
+    - Production trading engine
+    - Extensive risk checks and safety mechanisms
+    """
+
+    def __init__(self, config: Dict[str, Any]):
+        super().__init__(config)
+        self.log("info", "LIVE_TRADING mode: Production trading enabled")
+        self.paper_trading = False
+        self.live_mode = True
+        self.position_size_usd = float(POSITION_SIZE_USD)
+        self.max_open_positions = config.get("max_open_positions", 1)
+        self.max_trades_per_session = config.get("max_trades_per_session", 2)
+        self.max_position_size_usd = config.get("max_position_size_usd")
+        self.max_trade_loss_usd = config.get("max_trade_loss_usd")
+        self.max_daily_loss_usd = config.get("max_daily_loss_usd")
+        self.min_balance_usd = config.get("min_balance_usd")
+        self.order_type = config.get("order_type", "market")
+        self.adapter: Optional[ExchangeAdapter] = None
+        self._initialize_adapter()
+
+    def _initialize_adapter(self):
+        try:
+            self.adapter = KuCoinAdapter(
+                api_key=KUCOIN_API_KEY,
+                api_secret=KUCOIN_API_SECRET,
+                api_passphrase=KUCOIN_API_PASSPHRASE,
+            )
+            self.adapter.connect()
+            self.log("info", "Live API adapter initialized successfully")
+        except Exception as e:
+            self.log("error", f"Failed to initialize live adapter: {e}")
+            raise
+
+    def run_cycle(self):
+        self.log("info", "Starting live trading cycle...")
+        try:
+            self.write_heartbeat("running", "fetch_data")
+            self.write_heartbeat("running", "risk_check")
+            self._risk_check()
+            self.write_heartbeat("running", "monitor")
+            self.log("info", "Live trading cycle complete")
+        except Exception as e:
+            self.log("error", f"Live trading cycle error: {e}")
+            raise
+
+    def _validate_live_trade(
+        self,
+        entry_price: float,
+        position_size: float,
+        stop_loss: float,
+        account_balance: Optional[float],
+    ) -> Optional[str]:
+        position_value = entry_price * position_size
+        if account_balance is not None:
+            if position_value > account_balance * 1.1:
+                return f"CRITICAL: Position value ${position_value:.2f} exceeds account balance ${account_balance:.2f}"
+
+        if self.order_type not in {"market", "limit"}:
+            return f"Unsupported order type: {self.order_type}"
+        if len(self.open_positions) >= self.max_open_positions:
+            return f"Max open positions reached ({self.max_open_positions})"
+        if self.max_position_size_usd is not None:
+            position_size_usd = entry_price * position_size
+            if position_size_usd > self.max_position_size_usd:
+                return f"Position size ${position_size_usd:.2f} exceeds limit ${self.max_position_size_usd:.2f}"
+        if self.max_trade_loss_usd is not None and stop_loss > 0 and entry_price > 0:
+            risk_per_unit = max(entry_price - stop_loss, 0)
+            projected_loss = risk_per_unit * position_size
+            if projected_loss > self.max_trade_loss_usd:
+                return f"Projected loss ${projected_loss:.2f} exceeds limit ${self.max_trade_loss_usd:.2f}"
+        if self.max_daily_loss_usd is not None:
+            total_pnl = self._get_total_pnl()
+            if total_pnl <= -self.max_daily_loss_usd:
+                return f"Daily loss limit reached (${total_pnl:.2f} <= -${self.max_daily_loss_usd:.2f})"
+        if self.min_balance_usd is not None and account_balance is not None:
+            if account_balance < self.min_balance_usd:
+                return f"Account balance ${account_balance:.2f} below minimum ${self.min_balance_usd:.2f}"
+        return None
+
+    def _validate_session_limits(self) -> Optional[str]:
+        if self.total_trades >= self.max_trades_per_session:
+            return f"Max trades per session reached ({self.max_trades_per_session})"
+        if len(self.open_positions) >= self.max_open_positions:
+            return f"Max open positions reached ({self.max_open_positions})"
+        return None
+
+    def _risk_check(self):
+        if not self.adapter:
+            raise RuntimeError("Adapter not initialized")
+        try:
+            account_balance = self.adapter.get_balance()
+            if account_balance is not None:
+                self.log("info", f"Account balance: ${account_balance:.2f} USDT")
+        except Exception as e:
+            self.log("warning", f"Could not fetch balance: {e}")
+
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        market_data = input_data.get("market_data", {})
+        position_size = input_data.get("position_size", 0)
+        stop_loss = input_data.get("stop_loss", 0)
+        take_profit = input_data.get("take_profit", 0)
+        account_balance = input_data.get("account_balance")
+        position_approved = input_data.get("position_approved", None)
+        risk_approved = input_data.get("risk_approved", None)
+
+        if position_approved is False or risk_approved is False:
+            return {
+                "agent": "LiveExecutor",
+                "action": "execute_trade",
+                "success": True,
+                "data": {"trade_executed": False, "reason": "Risk approval required"},
+            }
+
+        if not market_data or position_size <= 0:
+            return {
+                "agent": "LiveExecutor",
+                "action": "execute_trade",
+                "success": True,
+                "data": {"trade_executed": False, "reason": "Invalid position size"},
+            }
+
+        session_limit_reason = self._validate_session_limits()
+        if session_limit_reason:
+            return {
+                "agent": "LiveExecutor",
+                "action": "execute_trade",
+                "success": True,
+                "data": {"trade_executed": False, "reason": session_limit_reason},
+            }
+
+        pair = list(market_data.keys())[0]
+        market_info = market_data[pair]
+        entry_price = market_info.get("current_price", 0)
+
+        rejection_reason = self._validate_live_trade(
+            entry_price=entry_price,
+            position_size=position_size,
+            stop_loss=stop_loss,
+            account_balance=account_balance,
+        )
+        if rejection_reason:
+            self.log("warning", f"Live trade rejected: {rejection_reason}")
+            return {
+                "agent": "LiveExecutor",
+                "action": "execute_trade",
+                "success": True,
+                "data": {"trade_executed": False, "reason": rejection_reason},
+            }
+
+        order_details = None
+        try:
+            self.log("warning", "LIVE TRADING ACTIVATED - Placing real order")
+            order_details = self.adapter.place_order(
+                pair=pair,
+                side="buy",
+                size=position_size,
+                order_type=self.order_type,
+                price=entry_price if self.order_type == "limit" else None,
+            )
+            self.log("info", f"Live order executed: {order_details}")
+
+            if stop_loss > 0:
+                try:
+                    sl_details = self.adapter.place_stop_loss(
+                        pair=pair, size=position_size, stop_price=stop_loss
+                    )
+                    self.log("info", f"Stop-loss placed: {sl_details}")
+                except Exception as e:
+                    self.log("error", f"CRITICAL: Failed to place stop-loss: {e}")
+
+            if take_profit > 0:
+                try:
+                    tp_details = self.adapter.place_take_profit(
+                        pair=pair, size=position_size, tp_price=take_profit
+                    )
+                    self.log("info", f"Take-profit placed: {tp_details}")
+                except Exception as e:
+                    self.log("error", f"CRITICAL: Failed to place take-profit: {e}")
+
+        except Exception as e:
+            error_msg = f"Live order failed: {str(e)}"
+            self.log("error", error_msg)
+            return {
+                "agent": "LiveExecutor",
+                "action": "execute_trade",
+                "success": False,
+                "error": error_msg,
+            }
+
+        trade = {
+            "trade_id": self.total_trades + 1,
+            "pair": pair,
+            "entry_price": entry_price,
+            "position_size": position_size,
+            "entry_value": entry_price * position_size,
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "entry_time": datetime.utcnow().isoformat(),
+            "status": TradeStatus.OPEN.value,
+            "paper_trading": False,
+            "pnl": 0,
+            "pnl_pct": 0,
+            "exit_price": None,
+            "exit_time": None,
+            "exit_reason": None,
+            "order_id": order_details.get("order_id") if order_details else None,
+            "stop_order_id": None,
+            "tp_order_id": None,
+        }
+
+        self.open_positions.append(trade)
+        self.total_trades += 1
+
+        self.log(
+            "info",
+            f"Trade {trade['trade_id']} [LIVE] OPENED: "
+            f"{pair} @ {entry_price:.4f} | Size: {position_size:.4f} | "
+            f"SL: {stop_loss:.4f} | TP: {take_profit:.4f}",
+        )
+
+        return {
+            "agent": "LiveExecutor",
+            "action": "execute_trade",
+            "success": True,
+            "data": {
+                "trade_executed": True,
+                "trade_id": trade["trade_id"],
+                "pair": pair,
+                "entry_price": entry_price,
+                "position_size": position_size,
+                "entry_value": trade["entry_value"],
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "paper_trading": False,
+                "open_positions_count": len(self.open_positions),
+            },
+        }
+
+    def _check_existing_positions_at_startup(self):
+        if not self.adapter:
+            return
+        try:
+            self.log(
+                "info", "Checking for existing positions and unexpected balances..."
+            )
+            account_balance = self.adapter.get_balance()
+            if account_balance is not None and account_balance > 0:
+                msg = (
+                    f"<b>ALERT: Existing Account Balance Detected</b>\n"
+                    f"Balance: ${account_balance:.2f} USDT\n"
+                    f"Bot will manage this balance."
+                )
+                send_telegram_notification(msg)
+            else:
+                self.log("info", "No unexpected positions - account clean")
+        except Exception as e:
+            self.log("error", f"Failed to check existing positions: {e}")
+
+
+class ExecutionAgent(BaseAgent):
+    """
+    Agent-compatible execution wrapper.
+
+    Wraps either DryRunExecutor or LiveExecutor and exposes the
+    BaseAgent interface for the orchestrator's workflow pipeline.
+    """
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        super().__init__("ExecutionAgent", config)
+        config = config or {}
+
+        dry_run = config.get("dry_run", DRY_RUN)
+        live = config.get("live_trading", LIVE_TRADING)
+
+        if dry_run:
+            self.engine = DryRunExecutor(config)
+        elif live:
+            self.engine = LiveExecutor(config)
+        else:
+            self.engine = DryRunExecutor(config)
+
+    def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
+        self.log_execution_start("execute_trade")
+        try:
+            result = self.engine.execute(input_data)
+            self.log_execution_end(
+                "execute_trade", success=result.get("success", False)
+            )
+            return result
+        except Exception as e:
+            error_msg = f"Trade execution error: {str(e)}"
+            self.set_status(AgentStatus.ERROR, error_msg)
+            self.log_execution_end("execute_trade", success=False)
+            return self.create_message(
+                action="execute_trade", success=False, error=error_msg
+            )
+
+    def close_position(
+        self, trade_id: int, exit_price: float, reason: str
+    ) -> Dict[str, Any]:
+        return self.engine.close_position(trade_id, exit_price, reason)
+
+    def update_open_positions(
+        self, current_prices: Dict[str, float]
+    ) -> List[Dict[str, Any]]:
+        return self.engine.update_open_positions(current_prices)
+
+    def get_performance_summary(self) -> Dict[str, Any]:
+        return self.engine.get_performance_summary()
+
+    def get_open_positions(self) -> List[Dict[str, Any]]:
+        return self.engine.get_open_positions()
+
+    def get_trade_history(self) -> List[Dict[str, Any]]:
+        return self.engine.get_trade_history()
+
+
+def select_executor(dry_run: bool, live_trading: bool) -> ExecutionEngine:
+    config = {
+        "dry_run": dry_run,
+        "live_trading": live_trading,
+        "position_size_usd": float(POSITION_SIZE_USD),
+        "monitor_interval_min": int(MONITOR_INTERVAL_MIN),
+    }
+
+    if dry_run:
+        logger.info("STARTING DRY_RUN MODE (Backtesting only)")
+        return DryRunExecutor(config)
+
+    if live_trading and not dry_run:
+        logger.warning("STARTING LIVE_TRADING MODE (REAL MONEY!)")
+        return LiveExecutor(config)
+
+    raise RuntimeError(
+        "Invalid mode: either DRY_RUN must be True or LIVE_TRADING must be True"
+    )

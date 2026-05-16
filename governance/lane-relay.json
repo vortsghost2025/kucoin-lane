@@ -1,0 +1,69 @@
+{
+  "schema_version": "1.0",
+  "lane": "kucoin-lane",
+  "lane_number": 4,
+  "description": "KuCoin margin trading bot — autonomous, self-healing, self-upgrading",
+  "inbox": {
+    "canonical_path": "S:/Archivist-Agent/lanes/kucoin/inbox/",
+    "local_mirror": "lanes/kucoin/inbox/"
+  },
+  "outbox": {
+    "canonical_path": "S:/Archivist-Agent/lanes/kucoin/outbox/",
+    "local_mirror": "lanes/kucoin/outbox/"
+  },
+  "heartbeat": {
+    "path": "lanes/kucoin/inbox/heartbeat-kucoin.json",
+    "interval_seconds": 60,
+    "stale_after_seconds": 900
+  },
+  "peer_lanes": {
+    "archivist": {
+      "inbox": "S:/Archivist-Agent/lanes/archivist/inbox/",
+      "role": "constitutional governance, checkpoint verification, session registry"
+    },
+    "kernel": {
+      "inbox": "S:/kernel-lane/lanes/kernel/inbox/",
+      "role": "optimization artifacts, benchmark reports"
+    },
+    "library": {
+      "inbox": "S:/self-organizing-library/lanes/library/inbox/",
+      "role": "knowledge retrieval, pattern search"
+    },
+    "swarmmind": {
+      "inbox": "S:/SwarmMind/lanes/swarmmind/inbox/",
+      "role": "multi-agent coordination, task routing"
+    }
+  },
+  "escalation_paths": {
+    "circuit_breaker_halt": {
+      "to": "archivist",
+      "priority": "P0",
+      "cc": "human",
+      "channel": "telegram + lane-relay"
+    },
+    "exchange_failure": {
+      "to": "archivist",
+      "priority": "P1",
+      "channel": "lane-relay"
+    },
+    "checkpoint_corruption": {
+      "to": "archivist",
+      "priority": "P1",
+      "channel": "lane-relay"
+    },
+    "audit_failure": {
+      "to": "archivist",
+      "priority": "P2",
+      "channel": "lane-relay"
+    },
+    "performance_degradation": {
+      "to": "kernel",
+      "priority": "P2",
+      "channel": "lane-relay"
+    }
+  },
+  "session_state": {
+    "path": "lanes/kucoin/inbox/SESSION_STATE.json",
+    "written_every_cycle": true
+  }
+}
