@@ -11,6 +11,13 @@ from .config import (
     MONITOR_CONFIG,
     REGIME_GUARD_MODE,
     TELEGRAM_CONFIG,
+    KUCOIN_API_KEY,
+    KUCOIN_API_SECRET,
+    KUCOIN_API_PASSPHRASE,
+    POSITION_SIZE_USD,
+    MONITOR_INTERVAL_MIN,
+    DRY_RUN,
+    LIVE_TRADING,
 )
 from .deterministic_startup import DeterministicStartup
 from .checkpoint_manager import CheckpointManager
@@ -30,6 +37,13 @@ __all__ = [
     "MONITOR_CONFIG",
     "REGIME_GUARD_MODE",
     "TELEGRAM_CONFIG",
+    "KUCOIN_API_KEY",
+    "KUCOIN_API_SECRET",
+    "KUCOIN_API_PASSPHRASE",
+    "POSITION_SIZE_USD",
+    "MONITOR_INTERVAL_MIN",
+    "DRY_RUN",
+    "LIVE_TRADING",
     "DeterministicStartup",
     "CheckpointManager",
     "EntryTimingValidator",

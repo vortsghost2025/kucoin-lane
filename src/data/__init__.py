@@ -1,11 +1,9 @@
-from .multi_provider_client import MultiProviderClient
+from .multi_provider_client import fetch_simple_price
 from .data_fetcher import DataFetchingAgent
 from .kucoin_uta_validator import KuCoinUTAValidator
-from .coingecko_client import CoinGeckoClient
 
 __all__ = [
-    "MultiProviderClient",
+    "fetch_simple_price",
     "DataFetchingAgent",
     "KuCoinUTAValidator",
-    "CoinGeckoClient",
 ]
