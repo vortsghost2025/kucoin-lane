@@ -84,3 +84,13 @@ TELEGRAM_CONFIG = {
     "bot_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
     "chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
 }
+
+KUCOIN_API_KEY = API_CONFIG["api_key"]
+KUCOIN_API_SECRET = API_CONFIG["api_secret"]
+KUCOIN_API_PASSPHRASE = API_CONFIG["api_passphrase"]
+
+POSITION_SIZE_USD = float(os.getenv("POSITION_SIZE_USD", "5.0"))
+MONITOR_INTERVAL_MIN = int(os.getenv("MONITOR_INTERVAL_MIN", "5"))
+
+DRY_RUN = TRADING_CONFIG["paper_trading"]
+LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
