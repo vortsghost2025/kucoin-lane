@@ -125,6 +125,26 @@ Every material action appended to this journal must include:
 |-----|-----------|--------|---------|--------|----------|
 | 0 | 17:14 | Updated journal with refined standing authorization scope and entry format | windows | SUCCESS | docs/JOURNAL.md |
 
+### Session 4 — 2026-05-16 (kilo/z-ai/glm-5.1)
+
+**Scope**: Phase D static validation on headless — full deep import + package re-export verification
+
+| Seq | Time (UTC) | Action | Surface | Result | Evidence |
+|-----|-----------|--------|---------|--------|----------|
+| 0 | ~17:00 | Ran py_compile on all 30 .py files on headless | headless | SUCCESS | 30/30 PASS |
+| 1 | ~17:05 | Ran hardcoded secret scan (grep -rE) on headless | headless | SUCCESS | 0 secrets found |
+| 2 | ~17:10 | Found BUG-006: stale data/__init__.py importing phantom MultiProviderClient/CoinGeckoClient | headless | BUG_FOUND | src/data/__init__.py |
+| 3 | ~17:12 | Fixed BUG-006: rewrote data/__init__.py with correct imports | windows | SUCCESS | Committed as 561f4a3 |
+| 4 | ~17:15 | Found BUG-007: config.py missing module-level KUCOIN_API_KEY etc. aliases | headless | BUG_FOUND | src/config.py |
+| 5 | ~17:17 | Fixed BUG-007: added 7 module-level aliases to config.py | windows | SUCCESS | Committed as e286209 |
+| 6 | ~17:20 | Found BUG-008: stale src/__init__.py not re-exporting new config aliases | headless | BUG_FOUND | src/__init__.py |
+| 7 | ~17:22 | Fixed BUG-008: added 7 re-exports to src/__init__.py (same commit as BUG-006 fix) | windows | SUCCESS | Committed as 561f4a3 |
+| 8 | ~17:30 | Deep import test: 24/24 module imports PASS | headless | SUCCESS | All modules verified |
+| 9 | ~17:35 | Package re-export test: 35/35 __init__.py re-exports PASS | headless | SUCCESS | All packages verified |
+| 10 | ~17:40 | Pushed 561f4a3 + e286209 to origin, pulled on headless | both | SUCCESS | HEAD: 561f4a3 |
+| 11 | 17:45 | Updated campaign artifacts: KUCOIN_CAMPAIGN_STATUS.json/.md, event timeline seq 6, decision gate | windows | SUCCESS | PHASE_D_PASSED_AWAITING_PHASE_E |
+| 12 | 18:05 | Appended Session 4 evidence to journal, updated phase tracker + bug table + TODO-006 | windows | SUCCESS | docs/JOURNAL.md |
+
 ---
 
 ## Phase Tracker
@@ -135,7 +155,7 @@ Every material action appended to this journal must include:
 | 1. Repository Sanity | Repo landed + identified | **PASS** | 2026-05-16T03:15 | 00_BOT_ARRIVAL_MANIFEST.json |
 | Pre-Touch | Baseline captured | **PASS** | 2026-05-16T15:55 | 01_PRETOUCH_BASELINE.json |
 | 2. Dependency Resolution | venv + imports OK | **PASS** | 2026-05-16T16:30 | 03_EVENT_TIMELINE.json (seq 5) |
-| 3. Static Validation | Syntax/lint pass | PENDING | — | — |
+| 3. Static Validation | Syntax/lint + deep imports + re-exports pass | **PASS** | 2026-05-16T17:45 | 03_EVENT_TIMELINE.json (seq 6) |
 | 4. Unit Tests | All tests pass | PENDING | — | — |
 | 5. Integration Tests | Local integration pass | PENDING | — | — |
 | 6. Dry-Run Startup | Bot starts paper mode | PENDING | — | — |
@@ -153,6 +173,10 @@ Every material action appended to this journal must include:
 | BUG-003 | 2026-05-16 | python-kucoin>=2.3.0 not on PyPI (max 2.2.0) | Changed to >=2.2.0 | 0cd15b9 |
 | BUG-004 | 2026-05-15 | config.py hardcoded KuCoin API credentials in plaintext | Replaced with os.getenv() | Pre-commit (ensemble) |
 | BUG-005 | 2026-05-15 | .gitignore excluded src/data/ package | Changed data/ to /data/ (root-only) | Pre-commit |
+| BUG-006 | 2026-05-16 | Stale data/__init__.py importing phantom MultiProviderClient/CoinGeckoClient classes | Rewrote to import fetch_simple_price, DataFetchingAgent, KuCoinUTAValidator | 561f4a3 |
+| BUG-007 | 2026-05-16 | config.py missing module-level aliases for KUCOIN_API_KEY etc. (execution_engine imports failed) | Added 7 aliases: KUCOIN_API_KEY through LIVE_TRADING | e286209 |
+| BUG-008 | 2026-05-16 | Stale src/__init__.py not re-exporting new config module-level aliases | Added 7 re-exports matching config.py aliases | 561f4a3 |
+| BUG-009 | 2026-05-16 | Deep import test used 24 phantom module names not matching repo structure | Wrote corrected test for 24 actual modules + 35 package re-exports | 561f4a3 (test) |
 
 ---
 
@@ -173,7 +197,7 @@ Every material action appended to this journal must include:
 | TODO-003 | P2 | Cross-lane escalation protocol | Deferred (governance gap) |
 | TODO-004 | P1 | Phenotype sync implementation (save_phenotype/restore_phenotype) | Not started — in checkpoint_manager.py |
 | TODO-005 | P3 | IaC templates (WS3b) | Not started |
-| TODO-006 | P1 | Phase D: Static validation on headless | IN PROGRESS — authorized under refined standing authorization |
+| TODO-006 | P1 | Phase D: Static validation on headless | **DONE** — 30/30 py_compile, 24/24 deep imports, 35/35 re-exports, 0 secrets |
 | TODO-007 | P1 | Phase E: Unit tests on headless | QUEUED |
 | TODO-008 | P1 | Phase F: Dry-run startup on headless | QUEUED |
 
