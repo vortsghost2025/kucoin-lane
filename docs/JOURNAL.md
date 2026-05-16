@@ -7,10 +7,37 @@ OUTPUT_PROVENANCE:
 work-journal
 
 ## AUTHORIZATION_SCOPE
-non_destructive_only: true
-governance_mutations_blocked: [archivist, kernel, library, swarm]
-governance_mutations_allowed: [kucoin-lane, control-plane-tools, intake-artifacts]
-destructive_ops_blocked: [rm_rf, force_push, credential_exposure, live_trading, exchange_api]
+
+### Standing Authorization (granted 2026-05-16 by seand)
+
+**Scope**: KuCoin headless campaign only
+
+**Authorized without asking again:**
+- Phase D static validation
+- Phase E unit tests
+- Phase F dry-run / paper-safe startup validation
+- Evidence capture
+- Journal updates
+- Campaign status / timeline / decision-gate updates
+- Dependency corrections required to make authorized non-live phases valid
+- Narrowly scoped code fixes directly required by an active non-live validation phase
+
+**Conditions (all must hold):**
+- Non-destructive
+- Inside kucoin-lane / KuCoin campaign scope
+- Journaled and evidence-backed
+- Compatible with existing Control Plane and Library documentation trail
+- Does not modify governance or runtime behavior of Archivist, Kernel, Library, or SwarmMind
+
+**NOT authorized without explicit new approval:**
+- Live trading
+- Exchange-side actions that can place or modify real orders
+- Destructive filesystem actions
+- Force pushes or history rewrites
+- Broad refactors not required by the active phase
+- Governance changes to the four main lanes (Archivist, Kernel, Library, SwarmMind)
+- Changing Control Plane / Library campaign architecture beyond their current documentation role
+- Involving other agents/lanes in new operational direction or changing shared project assumptions without surfacing first
 
 ---
 
@@ -32,6 +59,21 @@ destructive_ops_blocked: [rm_rf, force_push, credential_exposure, live_trading, 
 | 2026-05-16 | Repo landing on headless | git clone only | seand (implicit) |
 | 2026-05-16 | Phase C — dependency install | venv + pip install | seand (explicit) |
 | 2026-05-16 | Standing non-destructive authorization | All non-destructive work across all surfaces; no governance changes to Archivist/Kernel/Library/Swarm | seand (explicit) |
+| 2026-05-16 | Refined standing authorization | Phases D/E/F + evidence + journal + dependency fixes + narrowly scoped code fixes; explicit exclusions for live trading, destructive ops, governance changes, broad refactors, shared project assumption changes | seand (explicit) |
+
+---
+
+## Journal Entry Format
+
+Every material action appended to this journal must include:
+- **timestamp** — ISO 8601 UTC
+- **phase** — Current campaign phase (D, E, F, etc.)
+- **action taken** — What was done
+- **command or evidence reference** — Exact command run or artifact path
+- **result** — SUCCESS / FAILURE / PARTIAL / BLOCKED
+- **files changed** — List of files modified (or "none")
+- **decision status** — Current decision gate state
+- **next safe action** — What is authorized next
 
 ---
 
@@ -74,6 +116,14 @@ destructive_ops_blocked: [rm_rf, force_push, credential_exposure, live_trading, 
 | 10 | ~16:30 | Import smoke test: ALL_IMPORTS_OK | headless | SUCCESS | kucoin, requests, websockets, ta, numpy, dotenv, atomicwrites |
 | 11 | 16:55 | Wrote Phase C evidence: campaign status, event timeline (seq 5), decision gate | windows | SUCCESS | KUCOIN_CAMPAIGN_STATUS.json/.md, 03_EVENT_TIMELINE.json/.md, KUCOIN_CAMPAIGN_DECISION_GATE.json |
 | 12 | 17:11 | Created this journal | windows | SUCCESS | docs/JOURNAL.md |
+
+### Session 3 — 2026-05-16 (kilo/z-ai/glm-5.1)
+
+**Scope**: Refined standing authorization + journal format upgrade + Phase D start
+
+| Seq | Time (UTC) | Action | Surface | Result | Evidence |
+|-----|-----------|--------|---------|--------|----------|
+| 0 | 17:14 | Updated journal with refined standing authorization scope and entry format | windows | SUCCESS | docs/JOURNAL.md |
 
 ---
 
@@ -123,7 +173,7 @@ destructive_ops_blocked: [rm_rf, force_push, credential_exposure, live_trading, 
 | TODO-003 | P2 | Cross-lane escalation protocol | Deferred (governance gap) |
 | TODO-004 | P1 | Phenotype sync implementation (save_phenotype/restore_phenotype) | Not started — in checkpoint_manager.py |
 | TODO-005 | P3 | IaC templates (WS3b) | Not started |
-| TODO-006 | P1 | Phase D: Static validation on headless | NEXT — authorized under standing non-destructive |
+| TODO-006 | P1 | Phase D: Static validation on headless | IN PROGRESS — authorized under refined standing authorization |
 | TODO-007 | P1 | Phase E: Unit tests on headless | QUEUED |
 | TODO-008 | P1 | Phase F: Dry-run startup on headless | QUEUED |
 
