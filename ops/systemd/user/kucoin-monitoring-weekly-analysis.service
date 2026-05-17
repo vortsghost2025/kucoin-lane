@@ -1,0 +1,9 @@
+[Unit]
+Description=KuCoin lane weekly monitoring analysis (user)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/we4free/agent/repos/kucoin-lane
+ExecStart=/usr/bin/env python3 /home/we4free/agent/repos/kucoin-lane/scripts/monitoring_automation.py analyze --period weekly

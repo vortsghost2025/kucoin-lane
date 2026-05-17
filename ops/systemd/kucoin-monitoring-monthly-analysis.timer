@@ -1,0 +1,10 @@
+[Unit]
+Description=Run KuCoin lane monthly monitoring analysis
+
+[Timer]
+OnCalendar=*-*-01 00:30:00
+Persistent=true
+Unit=kucoin-monitoring-monthly-analysis.service
+
+[Install]
+WantedBy=timers.target

@@ -24,6 +24,7 @@ import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..base_agent import BaseAgent, AgentStatus
@@ -66,6 +67,19 @@ class TradeStatus(Enum):
     CANCELLED = "cancelled"
 
 
+PHASE_MAP: Dict[str, str] = {
+    "initializing": "booting",
+    "running": "active",
+    "sleeping": "standby",
+    "error": "fault",
+    "shutdown": "terminating",
+    "startup": "booting",
+    "pre_cycle": "active",
+    "post_cycle": "active",
+    "final": "terminating",
+}
+
+
 class ExecutionEngine(ABC):
     """Base class for execution engines with heartbeat and continuous loop."""
 
@@ -73,9 +87,14 @@ class ExecutionEngine(ABC):
         self.config = config
         mode_suffix = "dry_run" if "DryRun" in self.__class__.__name__ else "live"
         self.heartbeat_file = f"bot_heartbeat_{mode_suffix}.json"
+        self.session_state_lane, self.session_state_file = (
+            self._resolve_session_state_contract()
+        )
         self.start_time = datetime.now()
         self.cycle_count = 0
         self.is_running = True
+        self._last_runtime_status: Optional[str] = None
+        self._last_error: Optional[str] = None
         self.open_positions: List[Dict[str, Any]] = []
         self.closed_trades: List[Dict[str, Any]] = []
         self.total_trades = 0
@@ -85,7 +104,73 @@ class ExecutionEngine(ABC):
             f"ExecutionEngine initialized - using heartbeat: {self.heartbeat_file}"
         )
 
-    def write_heartbeat(self, status: str = "running", step: str = "main_loop"):
+    def _resolve_session_state_contract(self):
+        default_lane = "kucoin-lane"
+        default_path = Path("lanes/kucoin/inbox/SESSION_STATE.json")
+        contract_file = (
+            Path(__file__).resolve().parents[2] / "governance" / "lane-relay.json"
+        )
+
+        try:
+            if not contract_file.exists():
+                return default_lane, default_path
+
+            contract = json.loads(contract_file.read_text(encoding="utf-8"))
+            lane = contract.get("lane", default_lane)
+            session_path = (contract.get("session_state", {}) or {}).get("path") or str(
+                default_path
+            )
+            return lane, Path(session_path)
+        except Exception as e:
+            logger.warning(f"Failed to parse lane-relay contract: {e}")
+            return default_lane, default_path
+
+    def _resolve_phase(self, status: str) -> str:
+        return PHASE_MAP.get(status, "unknown")
+
+    def write_session_state(
+        self,
+        status: str = "running",
+        step: str = "main_loop",
+        error: Optional[str] = None,
+        final: bool = False,
+    ):
+        try:
+            status_to_write = status
+            if status in {"shutdown", "final"} and self._last_runtime_status == "error":
+                status_to_write = "error"
+                error = error or self._last_error or "cycle_error"
+
+            payload = {
+                "lane": self.session_state_lane,
+                "cycle": self.cycle_count,
+                "timestamp": datetime.now().isoformat(),
+                "mode": self.__class__.__name__,
+                "executor_class": self.__class__.__name__,
+                "status": status_to_write,
+                "runtime_status": status_to_write,
+                "phase": self._resolve_phase(status_to_write),
+                "final": final,
+                "step": step,
+                "pid": os.getpid(),
+                "uptime_seconds": (datetime.now() - self.start_time).total_seconds(),
+            }
+            if error:
+                payload["error"] = error
+
+            self.session_state_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.session_state_file, "w", encoding="utf-8") as f:
+                json.dump(payload, f)
+
+            self._last_runtime_status = status_to_write
+            if status_to_write == "error":
+                self._last_error = error or step
+        except Exception as e:
+            logger.warning(f"Failed to write SESSION_STATE: {e}")
+
+    def write_heartbeat(
+        self, status: str = "running", step: str = "main_loop", final: bool = False
+    ):
         try:
             heartbeat = {
                 "timestamp": datetime.now().isoformat(),
@@ -98,6 +183,12 @@ class ExecutionEngine(ABC):
             }
             with open(self.heartbeat_file, "w", encoding="utf-8") as f:
                 json.dump(heartbeat, f)
+            self.write_session_state(
+                status=status,
+                step=step,
+                error=step if status == "error" else None,
+                final=final,
+            )
         except Exception as e:
             logger.warning(f"Failed to write heartbeat: {e}")
 
@@ -156,7 +247,7 @@ class ExecutionEngine(ABC):
     def shutdown(self):
         self.log("info", "Shutting down execution engine")
         self.is_running = False
-        self.write_heartbeat("shutdown", "final")
+        self.write_heartbeat("shutdown", "final", final=True)
 
         mode_name = "LIVE_TRADING" if "Live" in self.__class__.__name__ else "DRY_RUN"
         uptime_seconds = (datetime.now() - self.start_time).total_seconds()

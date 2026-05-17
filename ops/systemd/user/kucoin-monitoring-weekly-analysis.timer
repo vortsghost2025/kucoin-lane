@@ -1,0 +1,10 @@
+[Unit]
+Description=Run KuCoin lane weekly monitoring analysis (user)
+
+[Timer]
+OnCalendar=Mon *-*-* 00:20:00
+Persistent=true
+Unit=kucoin-monitoring-weekly-analysis.service
+
+[Install]
+WantedBy=timers.target

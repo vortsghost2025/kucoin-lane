@@ -1,0 +1,10 @@
+[Unit]
+Description=Run KuCoin lane hourly monitoring snapshot
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+Unit=kucoin-monitoring-hourly.service
+
+[Install]
+WantedBy=timers.target
