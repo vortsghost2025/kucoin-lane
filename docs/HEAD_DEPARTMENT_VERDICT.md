@@ -6,6 +6,8 @@ lane: kucoin
 target: sean-operating-workflow
 status: in-progress (Mission 1 complete, proceeding sequentially)
 
+> **Documentation hierarchy:** `memory/` is the canonical structured source. This file is the narrative companion. When facts conflict, `memory/` wins. See the [Documentation Relationship Map](../README.md#documentation-relationship-map) in the root README for the full map of docs → memory → governance relationships.
+
 ---
 
 ## MISSION 1 — SYSTEM MAP FOR THE OPERATOR

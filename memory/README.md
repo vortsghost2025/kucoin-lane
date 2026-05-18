@@ -12,6 +12,10 @@ memory entries are the accumulated truth.
 | `blocker-matrix.md` | Live go-live blocker matrix, updated as blockers are resolved |
 | `wire-map.md` | Which classes are wired into runtime vs dead code |
 
+## Hierarchy
+
+`memory/` is the **canonical structured source** for all architectural truths, blocker statuses, and runtime wiring state. `docs/HEAD_DEPARTMENT_VERDICT.md` is the narrative companion — when facts conflict between memory/ and docs/, **memory/ wins**. See the [Documentation Relationship Map](../README.md#documentation-relationship-map) in the root README for the full cross-reference.
+
 ## Rules
 
 - Memory is accumulated truth. When a finding is confirmed, it stays.
