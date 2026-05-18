@@ -19,9 +19,11 @@ Decision Matrix:
 """
 
 import os
+import json
 import logging
 import time
 from datetime import datetime
+from pathlib import Path
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +31,7 @@ import pandas as pd
 
 from ..base_agent import BaseAgent, AgentStatus
 from ..config import REGIME_GUARD_MODE
+from ..risk.portfolio_circuit_breaker import PortfolioCircuitBreaker, CircuitBreakTriggered
 from .regime_detector import RegimeDetector
 from .lead_lag import LeadLagMonitor
 from .whale_watch import WhaleWatch
@@ -98,6 +101,13 @@ class IntelligenceOrchestrator(BaseAgent):
         self.agent_registry: Dict[str, BaseAgent] = {}
         self.is_paper_trading = config.get("paper_trading", True)
         self._last_daily_reset: Optional[str] = None
+        self._cycle_count = 0
+        self._account_balance = config.get("account_balance", 10000.0)
+        self._start_time = time.time()
+        self.portfolio_cb = PortfolioCircuitBreaker(
+            starting_equity=self._account_balance,
+            state_path=os.getenv("PORTFOLIO_CB_STATE_PATH", "portfolio_cb_state.json"),
+        )
 
         self.consecutive_notional_rejections = 0
         self.notional_rejection_threshold = config.get(
@@ -249,9 +259,10 @@ class IntelligenceOrchestrator(BaseAgent):
         new_balance = exec_data.get("account_balance") or exec_data.get("balance")
         if new_balance is None:
             return
+        self._account_balance = float(new_balance)
         risk_agent = self.agent_registry.get("RiskManagementAgent")
         if risk_agent and hasattr(risk_agent, "update_account_balance"):
-            risk_agent.update_account_balance(float(new_balance))
+            risk_agent.update_account_balance(self._account_balance)
             self.logger.info(f"Account balance updated from execution: {new_balance}")
 
     def _validate_agent_output(
@@ -547,6 +558,7 @@ class IntelligenceOrchestrator(BaseAgent):
         10. Audit (unconditional)
         """
         self.log_execution_start("orchestrate_trading_workflow")
+        cycle_start = time.time()
 
         cycle_results: Dict[str, Any] = {
             "data_result": None,
@@ -838,6 +850,7 @@ class IntelligenceOrchestrator(BaseAgent):
                     },
                 )
 
+            audit_data: Dict[str, Any] = {}
             if "AuditorAgent" in self.agent_registry:
                 audit_result = self._execute_agent_phase(
                     "AuditorAgent",
@@ -851,6 +864,132 @@ class IntelligenceOrchestrator(BaseAgent):
                     self.logger.critical(
                         f"POST-CYCLE AUDIT FAILED: {violation_summary}"
                     )
+                    self.activate_circuit_breaker(
+                        f"Audit failed: {violation_summary}"
+                    )
+
+                try:
+                    self.portfolio_cb.check(self._account_balance)
+                except CircuitBreakTriggered as e:
+                    self.activate_circuit_breaker(str(e))
+
+            self._write_cycle_artifacts(cycle_results, audit_data, cycle_start)
+
+    def _write_cycle_artifacts(
+        self,
+        cycle_results: Dict[str, Any],
+        audit_data: Dict[str, Any],
+        cycle_start: float,
+    ) -> None:
+        ts = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%S")
+        iso_ts = datetime.utcnow().isoformat()
+        result = cycle_results.get("final_result", {})
+        success = result.get("success", False) if isinstance(result, dict) else False
+        stage_val = self.current_stage.value
+        audit_passed = audit_data.get("audit_passed", True) if audit_data else True
+        violations = audit_data.get("violations", []) if audit_data else []
+        cb_active = self.circuit_breaker_active
+
+        cycle_md = (
+            f"# Cycle Report - {iso_ts}\n"
+            f"- workflow: orchestrate_trading_workflow\n"
+            f"- success: {success}\n"
+            f"- stage: {stage_val}\n"
+            f"- trading_paused: {self.trading_paused}\n"
+            f"- circuit_breaker_active: {cb_active}\n"
+            f"- pause_reason: {self.pause_reason}\n"
+            f"- audit_passed: {audit_passed}\n"
+            f"- violations: {len(violations)}\n"
+            f"- account_balance: {self._account_balance:.2f}\n"
+            f"- next_task: wait_for_next_cycle\n"
+        )
+
+        cycle_path = f"agent-logs/cycle-{ts}.md"
+        try:
+            with open(cycle_path, "w") as f:
+                f.write(cycle_md)
+        except Exception:
+            pass
+
+        trail_entry = {
+            "timestamp": iso_ts,
+            "audit_passed": audit_passed,
+            "violation_count": len(violations),
+            "violations": violations,
+            "circuit_breaker_active": cb_active,
+            "stage": stage_val,
+        }
+        trail_path = "agent-logs/audit-trail.jsonl"
+        try:
+            with open(trail_path, "a") as f:
+                f.write(json.dumps(trail_entry) + "\n")
+        except Exception:
+            pass
+
+        duration = time.time() - cycle_start
+        report = {
+            "timestamp": iso_ts,
+            "cycle_duration_seconds": round(duration, 2),
+            "success": success,
+            "stage": stage_val,
+            "trading_paused": self.trading_paused,
+            "circuit_breaker_active": cb_active,
+            "pause_reason": self.pause_reason,
+            "audit_passed": audit_passed,
+            "violations": violations,
+            "account_balance": self._account_balance,
+            "next_action": "wait_for_next_cycle",
+        }
+        report_path = f"agent-logs/return-report-{ts}.json"
+        try:
+            with open(report_path, "w") as f:
+                json.dump(report, f, indent=2)
+        except Exception:
+            pass
+
+        self._cycle_count += 1
+        uptime = time.time() - self._start_time
+        pid = os.getpid()
+        heartbeat_status = "post-cycle" if success else "error"
+        step = "post_cycle"
+
+        heartbeat = {
+            "timestamp": iso_ts,
+            "pid": pid,
+            "status": heartbeat_status,
+            "step": step,
+            "cycle": self._cycle_count,
+            "mode": self.__class__.__name__,
+            "uptime_seconds": round(uptime, 2),
+        }
+        try:
+            with open(f"bot_heartbeat_{'dry_run' if self.is_paper_trading else 'live'}.json", "w") as f:
+                json.dump(heartbeat, f)
+        except Exception:
+            pass
+
+        session_state = {
+            "lane": "kucoin-lane",
+            "cycle": self._cycle_count,
+            "timestamp": iso_ts,
+            "mode": self.__class__.__name__,
+            "executor_class": self.__class__.__name__,
+            "status": heartbeat_status,
+            "runtime_status": heartbeat_status,
+            "phase": "active",
+            "final": False,
+            "step": step,
+            "pid": pid,
+            "uptime_seconds": round(uptime, 2),
+        }
+        if cb_active or not success:
+            session_state["error"] = self.pause_reason or "cycle_error"
+        try:
+            Path("lanes/kucoin/inbox").mkdir(parents=True, exist_ok=True)
+            with open("lanes/kucoin/inbox/SESSION_STATE.json", "w") as f:
+                json.dump(session_state, f)
+        except Exception:
+            pass
 
     def get_system_status(self) -> Dict[str, Any]:
         agent_statuses = [

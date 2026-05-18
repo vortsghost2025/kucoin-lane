@@ -23,6 +23,7 @@ checkpoint.pkl
 
 # Logs
 logs/
+agent-logs/
 *.log
 
 # Position locks
