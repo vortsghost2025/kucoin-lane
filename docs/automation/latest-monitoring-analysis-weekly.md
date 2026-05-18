@@ -1,24 +1,24 @@
 OUTPUT_PROVENANCE:
   agent: monitoring-automation
   lane: kucoin
-  generated_at: 2026-05-18T00:10:05Z
+  generated_at: 2026-05-18T00:20:01Z
   source: scripts/monitoring_automation.py
-  type: daily-analysis
+  type: weekly-analysis
 
-# KuCoin Monitoring Daily Analysis
+# KuCoin Monitoring Weekly Analysis
 
-- Window start (UTC): `2026-05-17T00:10:05Z`
-- Window end (UTC): `2026-05-18T00:10:05Z`
+- Window start (UTC): `2026-05-11T00:20:01Z`
+- Window end (UTC): `2026-05-18T00:20:01Z`
 - Total rows in history file: `28`
-- Rows in window: `26`
+- Rows in window: `28`
 
 ## Availability
 - SESSION_STATE present: `100.0%`
 - Heartbeat present: `100.0%`
 
 ## Runtime Trends
-- Status counts: `shutdown:26`
-- Phase counts: `terminating:26`
+- Status counts: `shutdown:28`
+- Phase counts: `terminating:28`
 - Final=true ratio: `100.0%`
 
 ## Service Topology

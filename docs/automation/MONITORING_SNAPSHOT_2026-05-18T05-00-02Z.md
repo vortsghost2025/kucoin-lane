@@ -1,11 +1,11 @@
 OUTPUT_PROVENANCE:
   agent: monitoring-automation
   lane: kucoin
-  generated_at: 2026-05-18T09:00:01Z
+  generated_at: 2026-05-18T05:00:02Z
   source: scripts/monitoring_automation.py
   type: hourly-snapshot
 
-# KuCoin Monitoring Snapshot (2026-05-18T09:00:01Z)
+# KuCoin Monitoring Snapshot (2026-05-18T05:00:02Z)
 
 ## Repo
 - Path: `/home/we4free/agent/repos/kucoin-lane`
@@ -14,12 +14,12 @@ OUTPUT_PROVENANCE:
 
 ## SESSION_STATE
 - Path: `lanes/kucoin/inbox/SESSION_STATE.json`
-- Exists: `False`
-- Status: `None`
-- Phase: `None`
-- Final: `None`
-- Cycle: `None`
-- Mode: `None`
+- Exists: `True`
+- Status: `shutdown`
+- Phase: `terminating`
+- Final: `True`
+- Cycle: `1`
+- Mode: `DryRunExecutor`
 
 ## Heartbeat
 - Path: `bot_heartbeat_dry_run.json`
