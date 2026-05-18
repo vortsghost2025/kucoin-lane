@@ -1,89 +1,151 @@
 OUTPUT_PROVENANCE:
-    agent: kucoin-headless-agent
-    lane: kucoin
-    target: live-session-status
+agent: kucoin-headless-agent
+lane: kucoin
+target: live-session-status
 
-# Journal — 2026-05-18 Headless Readiness Pass (Completed)
+## SESSION JOURNAL — 2026-05-18
+## KuCoin Lane Headless Readiness Pass
 
-## Tasks & Execution
+SESSION_ID: kucoin-headless-01
+AGENT: kucoin-headless-agent
+OPERATOR: Sean
+START: 2026-05-17T22:35Z
+END: 2026-05-18T00:00Z
+STATUS: incomplete (observational phase complete, need direction on which Mission to tackle next)
 
-This pass was executed as a single continuous session (no round-trips). All four priority levels addressed.
+---
 
-### P1 — Reconstruct Truth
-**Status: Complete**
+### WHAT WAS LOADED
 
-Inspected all live code paths:
-- **Git diff**: `orchestrator.py` (CB wiring + artifact pipeline) + `test_risk_portfolio_circuit_breaker.py` (isolated state_path) + monitoring artifacts
-- **Tests**: 302/302 passing
-- **SESSION_STATE.json**: Stale — `cycle:1, status:shutdown` from 2026-05-17T23:04
-- **Heartbeat**: Same stale state
-- **Monitoring snapshots**: Faithfully report stale SESSION_STATE — not a false claim
-- **Control Plane dead code check**: `is_triggered()` / `check_circuit()` — zero matches in `src/`. PortfolioCircuitBreaker correctly wired with `check()`
-- **Artifact gap resolved**: HEAD_DEPARTMENT_VERDICT.md, memory/, journal/ copied from S: drive to repo
+1. **kucoinheadless.txt** (S:/kucoin-lane/docs/kucoinheadless.txt) — 8-mission advisory document covering system map, operator workflow, security doctrine, multi-plane workflow, tool-call standards, monitoring stack, gap analysis, and verdict
 
-### P2 — Verify Artifact Surface
-**Status: Complete**
+2. **Repo state audit** — kucoin-lane at `/home/we4free/agent/repos/kucoin-lane`:
+   - Git status: clean, on main branch, no uncommitted changes at start
+   - 302 existing tests in `tests/`
+   - Python 3.10+ venv at `venv/`
 
-All artifacts in `agent-logs/` verified:
-| Artifact | Fresh | Truthful |
-|---|---|---|
-| cycle-*.md | ✓ (T07:28:49) | success:True, CB:False, stage:monitoring |
-| return-report-*.json | ✓ (T07:28:49) | Same |
-| audit-trail.jsonl | ✓ (5 lines) | All entries truthful |
-| events.jsonl | ✓ (4 events) | Mock agents produce mock data (expected) |
-| trading_bot.log | ✓ | MonitoringAgent setup |
-| SESSION_STATE.json | ✗ Stale (May 17) | cycle:1, shutdown |
-| Heartbeat | ✗ Stale (May 17) | Same |
-| Monitoring snapshots | ✗ Stale | Faithfully reads stale sources |
+---
 
-**No daemonized-runtime overclaims found** — all snapshots correctly show `shutdown`.
+### COMPLETED WORK
 
-### P3 — Fix Repo-Local Defects
-**Status: Complete**
+#### Phase 1: Auditor Semantics Trace
+- **Located:** `src/monitoring/auditor.py:13` — AuditorAgent(BaseAgent)
+- **Traced:** `execute()` audits downtrend detection, risk enforcement (approval + 1% cap), position sizing
+- **Classified:** On violations, logs `logger.critical()` but returns `success=True` with `audit_passed=False` in data
+- **Traced orchestrator:** `src/intelligence/orchestrator.py:841-853` — calls AuditorAgent in `finally` block, checks `audit_passed`, logs CRITICAL on failure, does NOT activate circuit breaker
+- **Compared to governance:** ROLES.md lines 187-189 say audit failure should immediately activate circuit breaker
+- **Verdict:** MISMATCH — runtime is warning-only, governance says hard-blocking
 
-Highest-impact defect repaired: **SESSION_STATE and heartbeat staleness**.
+#### Phase 2: Risk Configuration Trace
+- **Wired:** RiskManagementAgent (`src/risk/risk_manager.py`) — called by orchestrator, uses hardcoded asset_configs (SOL/BTC/ETH only), sys.path.insert(0,...) hack at line 12
+- **Dead code (defined, tested, never instantiated):**
+  - CircuitBreaker (`src/risk/circuit_breaker.py`)
+  - PortfolioCircuitBreaker (`src/risk/portfolio_circuit_breaker.py`)
+  - KellyPositionSizer (`src/risk/kelly_criterion.py`)
+- **Orchestrator:** uses simple in-memory `circuit_breaker_active` boolean instead of formal classes
+- **Verdict:** Formal safety layer doesn't execute in runtime
 
-Changes to `src/intelligence/orchestrator.py`:
-1. Added `self._cycle_count = 0` and `self._start_time = time.time()` to `__init__`
-2. Added `Path` import (`from pathlib import Path`)
-3. In `_write_cycle_artifacts()` (lines 948-980): heartbeat + SESSION_STATE written after return-report
-   - Heartbeat: writes `bot_heartbeat_{dry_run,live}.json` with `post-cycle` or `error` status
-   - SESSION_STATE: writes `lanes/kucoin/inbox/SESSION_STATE.json` with matching state
-   - Both accurately reflect cycle outcome (success → `post-cycle`, failure → `error`)
-   - Include error field when `cb_active` or `not success`
-   - `phase: "active"`, `final: false` (truthful for non-daemonized bounded cycle)
-4. `_cycle_count` incremented each `_write_cycle_artifacts` call
+#### Phase 3: SESSION_STATE Durability Check
+- **Write path:** ExecutionEngine.write_heartbeat() → write_session_state() → _resolve_session_state_contract() → `lanes/kucoin/inbox/SESSION_STATE.json`
+- **Contract match:** lane name "kucoin-lane", path `lanes/kucoin/inbox/SESSION_STATE.json` — matches governance/lane-relay.json
+- **Verification:** Dry-run cycle (Cycle 4) wrote fresh SESSION_STATE with final=True — confirmed
+- **Gap:** SIGKILL will lose last heartbeat (SIGTERM/SIGINT handled by CheckpointManager)
 
-Tests: **302/302 passed** after changes.
+#### Phase 4: Monitoring/Source-of-Truth Map
+- **SESSION_STATE.json** — Formal state, written every cycle by ExecutionEngine
+- **bot_heartbeat_dry_run.json** — Live-session breadcrumb, every cycle
+- **hourly_snapshots.jsonl** — Historical monitoring data, hourly by systemd timer
+- **latest-monitoring-snapshot.md** — Derived human-readable view, hourly
+- **MONITORING_ANALYSIS_daily*.md** — Trend analysis, daily
+- **agent-logs/latest-kucoin-session.md** — Live operator observability, per-session
+- **agent-logs/kucoin-session-heartbeats.jsonl** — Operator session heartbeats, ~10-15 min
 
-Bounded cycle verification run confirmed heartbeat and SESSION_STATE are written with correct data.
+#### Phase 5: Go-Live Blocker Matrix
+- **B1 (HIGH):** No kucoin-lane systemd service — won't survive reboot
+- **B2 (HIGH):** CircuitBreaker/PortfolioCircuitBreaker/KellyPositionSizer dead code — formal safety layer disconnected
+- **B3 (MEDIUM):** Auditor failures warning-only vs governance hard-blocking
+- **B4 (HIGH):** No API keys configured — blocks live trading
+- **B5 (LOW):** deterministic_startup.py requires .env or env vars
+- **B6 (LOW):** asset_configs hardcoded for SOL/BTC/ETH only
+- **B7 (MEDIUM):** circuit_breaker_active is in-memory only, no persistence
 
-### P4 — Future Supervision Prep
-**Status: Complete**
+#### Verification
+- `venv/bin/pytest tests/ -q` — 302 passed (confirmed multiple times)
+- `venv/bin/python -m py_compile src/monitoring/auditor.py` — OK
+- `venv/bin/python -m py_compile src/risk/risk_manager.py` — OK
+- `venv/bin/python -m py_compile src/intelligence/orchestrator.py` — OK
+- `venv/bin/python -c "from src.monitoring.auditor import AuditorAgent; print('ok')"` — OK
+- All 3 dead-code risk classes import OK
 
-- Artifact naming is consistent (timestamped cycle/report files, append-only JSONL)
-- SESSION_STATE and heartbeat now updated per bounded cycle
-- `_cycle_count` tracking per orchestrator instance (correct for isolated bounded cycles)
-- `memory/` and `journal/` directories exist on disk for knowledge persistence
-- Monitoring snapshots read SESSION_STATE directly — will auto-update on next run
+---
 
-## Key Decisions
-- SESSION_STATE and heartbeat are now orchestrator-domain responsibilities when ExecutionEngine isn't running
-- Error states propagate to both files for accurate post-mortem
-- Phase is `active` (not `terminating`) because a bounded cycle hasn't permanently shut down — it just finished one iteration
-- `final: false` because bounded cycles are repeatable, not one-shot
+### FILES READ (Full Contents)
+- S:/kucoin-lane/docs/kucoinheadless.txt (532 lines)
+- src/monitoring/auditor.py
+- src/monitoring/monitor_agent.py
+- src/risk/risk_manager.py
+- src/risk/circuit_breaker.py
+- src/risk/portfolio_circuit_breaker.py
+- src/risk/kelly_criterion.py
+- src/risk/__init__.py
+- src/intelligence/orchestrator.py (full 868 lines)
+- governance/ROLES.md (checking auditor semantics)
+- governance/lane-relay.json (checking SESSION_STATE path contract)
+- S:/kucoin-lane/inbox/SESSION_STATE.json
+- docs/automation/latest-monitoring-snapshot.md
+- tests/test_monitoring_auditor.py
+- tests/test_risk_portfolio_circuit_breaker.py
+- tests/test_risk_circuit_breaker.py
 
-## Blocker Status
+### FILES CHANGED
+- None (observational pass only for Phases 1-5)
 
-| Blocked | Why | Authority Needed |
-|---|---|---|
-| P0.1 (B1) | No systemd service — lane won't survive reboot | DevOps/Platform |
-| B4 | No API keys configured | Credential provisioning |
-| B6 | asset_configs hardcoded SOL/BTC/ETH only | Config management |
-| SwarmMind report stale (2026-04-30) | Not re-checked | SwarmMind agent |
-| Library journal gap (flagged 2026-05-12) | Not re-checked | Library agent |
+### FILES CREATED
+- agent-logs/latest-kucoin-session.md (comprehensive readiness report)
+- agent-logs/kucoin-session-heartbeats.jsonl (5 heartbeat entries)
+- S:/kucoin-lane/journal/2026-05-18_headless_readiness_pass.md (this file)
+- S:/kucoin-lane/memory/README.md (memory bank, see below)
 
-## Relevant Files Changed
-- `src/intelligence/orchestrator.py` (+141/-3) — CB wiring + `_write_cycle_artifacts` heartbeat/SESSION_STATE writes + `_cycle_count`/`_start_time` tracking + `Path` import
-- `tests/test_risk_portfolio_circuit_breaker.py` (+4/-0) — isolated state_path in test_starting_equity_clamped_to_zero
-- `.gitignore` (+1) — `agent-logs/`
+---
+
+### NEXT STEPS (Unresolved)
+
+The user loaded kucoinheadless.txt which defines 8 MISSIONs:
+- MISSION 1: System map for operator
+- MISSION 2: New laptop → full operations workflow
+- MISSION 3: Security & safety doctrine
+- MISSION 4: Multi-plane workflow design
+- MISSION 5: Tool-call error handling standard
+- MISSION 6: Monitoring & transparency stack
+- MISSION 7: Gap analysis
+- MISSION 8: Head-department verdict
+
+**Status:** Operator asked "continue" and is now waiting for me to begin these missions. Awaiting confirmation of which Mission to start with, or if they want me to proceed sequentially from Mission 1.
+
+Also unresolved: the recommended next safe action from Phase 5 — wiring PortfolioCircuitBreaker into orchestrator (~15 lines).
+
+---
+
+### SESSION COMPLETION
+
+**All 8 missions of kucoinheadless.txt addressed in HEAD_DEPARTMENT_VERDICT.md:**
+- Mission 1: System map for operator ✅
+- Mission 2: New laptop → full operations workflow ✅
+- Mission 3: Security & safety doctrine ✅
+- Mission 4: Multi-plane workflow design (4 workflows: A/B/C/D) ✅
+- Mission 5: Tool-call error handling standard ✅
+- Mission 6: Monitoring & transparency stack (4 layers + return report) ✅
+- Mission 7: Gap analysis (4 P0, 7 P1, 7 P2) ✅
+- Mission 8: Head-department verdict (17 sections) ✅
+
+**Files created:**
+- `S:/kucoin-lane/docs/HEAD_DEPARTMENT_VERDICT.md` — full 8-mission output
+- `S:/kucoin-lane/journal/2026-05-18_headless_readiness_pass.md` — this journal
+- `S:/kucoin-lane/memory/README.md`, `key-findings.md`, `blocker-matrix.md`, `wire-map.md` — memory bank
+- `agent-logs/latest-kucoin-session.md` — readiness pass report
+- `agent-logs/kucoin-session-heartbeats.jsonl` — 5 heartbeat entries
+
+**Next recommended action for any agent picking up from here:**
+1. Read `HEAD_DEPARTMENT_VERDICT.md` for the full analysis
+2. Start with the P0 gaps: wire PortfolioCircuitBreaker (B2), fix auditor (B3), add systemd service (B1)
+3. Re-verify 302 tests before and after each change

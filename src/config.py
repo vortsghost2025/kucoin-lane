@@ -94,3 +94,9 @@ MONITOR_INTERVAL_MIN = int(os.getenv("MONITOR_INTERVAL_MIN", "5"))
 
 DRY_RUN = TRADING_CONFIG["paper_trading"]
 LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
+
+
+MAX_POSITION_SIZE_USD_GLOBAL = float(os.getenv("MAX_POSITION_SIZE_USD", "10.0"))
+MAX_TRADE_LOSS_USD = float(os.getenv("MAX_TRADE_LOSS_USD", "5.0"))
+MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "10.0"))
+MIN_BALANCE_USD = float(os.getenv("MIN_BALANCE_USD", "10.0"))

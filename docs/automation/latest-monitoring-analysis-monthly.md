@@ -3,11 +3,11 @@ OUTPUT_PROVENANCE:
   lane: kucoin
   generated_at: 2026-05-16T23:49:37Z
   source: scripts/monitoring_automation.py
-  type: weekly-analysis
+  type: monthly-analysis
 
-# KuCoin Monitoring Weekly Analysis
+# KuCoin Monitoring Monthly Analysis
 
-- Window start (UTC): `2026-05-09T23:49:37Z`
+- Window start (UTC): `2026-04-16T23:49:37Z`
 - Window end (UTC): `2026-05-16T23:49:37Z`
 - Total rows in history file: `1`
 - Rows in window: `1`

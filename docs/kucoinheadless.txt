@@ -1,0 +1,532 @@
+OUTPUT_PROVENANCE
+agent Seanoperator
+lane exterior-to-kucoin-headless
+target cross-system headless workflow, security, monitoring, and lane-usage advisory
+priority high
+mode bounded autonomous audit + operator playbook generation
+
+KuCoin headless agent — for this pass, act as my
+
+1. Head Developer
+2. Security  Safety Department
+3. Monitoring & Observability Department
+4. Practical Headless Operations Advisor
+
+I want you to step above a single-lane KuCoin task and advise me on how I should use the entire system cleanly and safely from the moment I connect to the headless machine through the point where work is actively running, monitored, tested, transparent, and recoverable.
+
+This is an advisory  architecture  operator-workflow task first.  
+You may create repo-local documentation artifacts in kucoin-lane to preserve the result, but do not mutate other repos unless explicitly stated below.
+
+============================================================
+CORE QUESTION
+============================================================
+
+Given the system as it exists now — lanes, headless agents, local agents, Control Plane, monitoring surfaces, Research Intake, Library evidence workflows, compactrestore continuity, live-session breadcrumb files, provenance rules, driftquarantine concepts, and tool-call failure realities — what is the best practical operating workflow for Sean
+
+I want a concrete answer to
+
+ When I sit down at a new machine, connect to the headless, and want to run this whole ecology responsibly, how should I use every lane and plane so the system remains productive, observable, secure, testable, and hard to fool
+
+============================================================
+NON-NEGOTIABLE CONSTRAINTS
+============================================================
+
+1. Do not activate live trading.
+2. Do not print, expose, move, delete, or rewrite secrets.
+3. Do not mutate Archivist, Library, SwarmMind, Kernel, Control Plane, Research Intake, or Federation repos.
+4. You may inspect those repos and their visible artifacts if already accessible on the headless.
+5. You may write your final deliverables inside kucoin-lane in a clearly labeled docs or agent-logs location.
+6. Do not overstate. Separate
+   - confirmed from filesruntime
+   - inferred from system shape
+   - recommended practice
+   - unresolved  needs Sean
+7. Treat current system artifacts as potentially stale until checked.
+8. Explicitly account for tool-call timeouts, filesystem permission prompts, MCP failures, stale state files, and localheadless divergence.
+9. Recommend workflows that reduce operator blindness, especially given Sean’s visual disability and reliance on cross-agent exterior verification.
+10. Use existing WE4FREE governance concepts where they apply
+    - provenance
+    - quarantine
+    - last-known-good restore
+    - confidencestatus outcomes
+    - truth  output
+    - if it is not in the live execution path, it does not exist
+
+============================================================
+LOAD CONTEXT FIRST
+============================================================
+
+Before producing recommendations, inspect enough of the current system to ground the advice.
+
+At minimum, inspect what is accessible and relevant from
+
+A. KuCoin lane itself
+---------------------
+- current repo state
+- README  AGENTS  governance docs
+- current monitoring surfaces
+- SESSION_STATE.json
+- latest-monitoring-snapshot.md
+- bot_heartbeat_dry_run.json or equivalent
+- agent-logslatest-kucoin-session.md
+- agent-logskucoin-session-heartbeats.jsonl
+- monitoring_automation.py
+- any current tests  dry-run pathways  safety docs
+- latest work summaries if present
+
+B. Headless visible operating ecology
+-------------------------------------
+Where accessible without destructive action, inspect
+- which repositories are present under homewe4freeagentrepos
+- current repo names and obvious roles
+- visible lane inboxoutboxstate conventions
+- any live supervision, heartbeat, session, or monitoring artifacts
+- obvious systemd servicetimer clues if already known or cheaply inspectable
+- whether the headless layout suggests active Archivist  Library  SwarmMind  Kernel  KuCoin responsibilities
+
+C. Control Plane  supervision concepts
+----------------------------------------
+Read-only, where accessible
+- Control Plane supervision docs or reports if visible
+- latest cp-supervise report if present
+- KuCoin Live Session convergence artifacts if visible
+- any operator dashboardsupervisor docs relevant to how Sean should watch the system
+
+D. Research  continuity plane
+-------------------------------
+Read-only, where accessible
+- Research Intake artifacts or summaries if present on headless
+- continuity delta  ablation concepts if surfaced in shared artifacts
+- any local headless notes relevant to session continuity or adaptive trajectory residue
+
+E. Library  evidence lane posture
+----------------------------------
+Read enough to understand how Library is currently being used
+- evidence intake
+- truth classification
+- localheadless reconciliation
+- provenance exception handling
+- operator return briefs
+
+============================================================
+MISSION 1 — MAP THE SYSTEM AS AN OPERATOR SHOULD THINK ABOUT IT
+============================================================
+
+Produce a practical system map for me.
+
+I do not want a generic architecture diagram in prose.  
+I want an operator map that answers
+
+1. What is each lane  plane for
+2. What kinds of work should go there
+3. What kinds of work should NOT go there
+4. What outputs should I expect from it
+5. What should I check to know it is healthy
+6. What is its failure mode when it drifts or goes stale
+
+Cover at least
+
+- Archivist
+- Library
+- SwarmMind
+- Kernel-Lane
+- KuCoin lane
+- Control Plane
+- Research Intake
+- Federation  experimental product plane if relevant to current system operation
+
+Recommended output format
+
+ Surface  Primary role  Good tasks  Bad tasks  Health signals  Failure signals  Sean should use it when... 
+
+============================================================
+MISSION 2 — DEFINE THE FROM NEW LAPTOP TO FULL OPERATIONS WORKFLOW
+============================================================
+
+Create a step-by-step operating workflow starting from
+
+ Sean is on a new Windows laptop away from home and wants to connect to the headless safely and resume serious work.
+
+Break it into phases
+
+PHASE 0 — Access and identity
+- connect to tailnet  SSH
+- verify you are on the correct host
+- confirm datetimesystem identity if relevant
+- avoid accidentally working on the wrong machine
+
+PHASE 1 — Headless health check
+- what should Sean inspect first
+- what must be healthy before trusting the system
+- how to know if agents are alive vs stale
+- how to know if monitoring surfaces are stale
+- how to know whether a repo is dirty  diverged
+
+PHASE 2 — Operator dashboard  observability check
+- what to open first
+- Control Plane role
+- monitoring snapshots role
+- live-session heartbeat role
+- how to read stale-vs-live drift indicators
+- what should be considered safe to ignore vs must investigate
+
+PHASE 3 — Choosing which lane to task
+- decision rule for whether a task goes to
+  - Archivist
+  - Library
+  - SwarmMind
+  - Kernel
+  - KuCoin
+  - Research Intake
+  - Control Plane
+- give concrete examples
+
+PHASE 4 — Launching work responsibly
+- what a good prompt packet should contain
+- what every agent assignment should include
+  - provenance
+  - target
+  - constraints
+  - mutation permissions
+  - verification expectations
+  - what to do if blocked
+- how to prevent agents from asking every 90 seconds when the work can be completed autonomously
+
+PHASE 5 — Monitoring live work
+- how Sean should watch agents without micromanaging
+- how to tell
+  - working normally
+  - stuck
+  - tool timeout
+  - false progress
+  - repeating itself
+  - hung because of permissions
+- what artifacts should be refreshed while it runs
+
+PHASE 6 — Completion and truth classification
+- what counts as DONE
+- what counts as report only
+- what counts as claimed but not proven
+- what proof to expect
+  - tests
+  - typecheck
+  - runtime check
+  - live HTTP verification
+  - file refs
+  - state beforeafter
+- when Library should audit a result
+- when Archivist should ratify or quarantine a claim
+
+PHASE 7 — End of session  continuity preservation
+- what should be journaled
+- what should enter memory bank
+- what should be compactrestore-safe
+- how to preserve live session breadcrumbs
+- what should be handed to Library  Research Intake  Control Plane before walking away
+
+Deliverable
+A clean operator runbook titled something like
+
+- docsHEADLESS_MULTI_PLANE_OPERATOR_WORKFLOW.md
+
+or the most appropriate kucoin-lane documentation path.
+
+============================================================
+MISSION 3 — SECURITY AND SAFETY DOCTRINE
+============================================================
+
+As my security department, identify the most important operating rules that keep this ecology safe.
+
+Cover
+
+1. Secret handling
+   - env files
+   - API keys
+   - trading credentials
+   - dashboardwebhook secrets
+   - what agents may inspect vs must not print
+
+2. Mutation boundaries
+   - how to prevent one lane from silently modifying another
+   - when cross-repo changes need explicit authorization
+   - how to use read-only audit vs scoped patch
+
+3. Drift  stale-state hazards
+   - stale SESSION_STATE-style artifacts
+   - derived monitoring snapshots that look authoritative but are stale
+   - agents reporting healthy from outdated inputs
+   - localheadless divergence
+
+4. Monitoring integrity
+   - ensure monitoring is not mistaken for source of truth
+   - derive but do not overwrite truth
+   - show contradictions rather than masking them
+
+5. Tool-call and MCP reliability
+   - timeouts
+   - partial failures
+   - permission prompts
+   - inaccessible paths
+   - how agents should degrade gracefully and continue safe work
+
+6. Trading-specific strictness for KuCoin
+   - dry-run vs live
+   - when no-live-trading constraints must be restated
+   - what would need formal operator authorization later
+   - what evidence would be required before even discussing live activation
+
+7. Restore and compaction safety
+   - what to preserve
+   - what to re-verify after restore
+   - what compact summaries can mislead about
+   - how to re-ground a compacted session against live artifacts
+
+Deliverable
+Add a section or companion doc such as
+
+- docsHEADLESS_SECURITY_MONITORING_DOCTRINE.md
+
+Use
+- Threat  risk
+- Why it matters
+- Current mitigation
+- Recommended standard operating practice
+
+============================================================
+MISSION 4 — DESIGN THE IDEAL MULTI-PLANE WORKFLOW
+============================================================
+
+Now answer the higher-level question
+
+How should I use all lanes and planes together as a coherent workflow
+
+Provide at least three full example workflows
+
+WORKFLOW A — New engineering task
+Example
+I notice a reporuntime bug and want it fixed safely.
+
+Show
+- who investigates first
+- who patches
+- who verifies
+- who audits
+- who updates monitoring
+- who captures research significance if one emerges
+
+WORKFLOW B — New anomaly  research discovery
+Example
+I notice a long-lived session behaves differently after compaction.
+
+Show
+- how Research Intake handles it
+- when Library gets involved
+- when Archivist governs the claim
+- how to avoid inflating it
+- how experiments get designed
+- where evidence gets stored
+
+WORKFLOW C — Headless operational issue
+Example
+One agent or monitoring surface looks stale or unhealthy.
+
+Show
+- what Control Plane does
+- what lane investigates source truth
+- what Library classifies
+- when Sean intervenes
+- what gets fixed vs merely documented
+
+Optional
+WORKFLOW D — KuCoin lane readiness  safety review
+Example
+Can I trust this lane to remain dry-run-safe and observable overnight
+
+============================================================
+MISSION 5 — TOOL-CALL ERROR HANDLING AND TRANSPARENCY STANDARD
+============================================================
+
+Create a specific standard for how agents should handle tool trouble.
+
+I want a policy-like recommendation that says
+
+When a tool call
+- times out
+- returns incomplete data
+- fails due to permissions
+- hits a missing dependency
+- returns stalecontradictory output
+- is unavailable entirely
+
+the agent should
+
+1. identify the failure precisely
+2. distinguish work not done from work disproven
+3. attempt the next safest alternate check if available
+4. record the failure in output  journal if materially relevant
+5. continue with bounded work if possible
+6. escalate only when necessary
+
+Deliverable
+Include a Tool-Call Failure Handling Standard section in the runbook or separate companion document.
+
+I especially want this tuned to my actual ecosystem
+- OpenCodeKilo filesystem prompts
+- MCP operation timeouts
+- SSH checks
+- venvtest path mismatches
+- stale cachedgenerated artifacts
+- repo path assumptions that are wrong on Windows vs headless Linux
+
+============================================================
+MISSION 6 — MONITORING AND TRANSPARENCY STACK RECOMMENDATION
+============================================================
+
+As my monitoring department, tell me what the ideal live visibility stack should be.
+
+Split it into layers
+
+LAYER 1 — Raw truth artifacts
+Examples
+- state JSON
+- heartbeats
+- journals
+- repo git state
+- live runtime process evidence
+
+LAYER 2 — Derived monitoring views
+Examples
+- monitoring snapshots
+- cp-supervise reports
+- dashboard cards
+- latest status markdown
+
+LAYER 3 — Evidence  audit views
+Examples
+- Library truth classification
+- provenance checks
+- contradiction tables
+- headlesslocal reconciliation
+
+LAYER 4 — Research escalation views
+Examples
+- anomalies that become Research Intake packets
+- persistent unexplained differences
+- unusual session continuity phenomena
+
+For each layer
+- purpose
+- examples in the current system
+- what it must never be confused with
+- freshness expectations
+- who owns it
+
+Then recommend
+- what dashboards Sean should keep open
+- what textstatus files are actually worth checking
+- what can be backgrounded
+- what should become a standard return from being away report
+
+============================================================
+MISSION 7 — WHAT IS STILL MISSING
+============================================================
+
+Give me a candid gap analysis.
+
+Identify
+- missing tooling
+- missing reports
+- missing operator UX
+- missing data freshness contracts
+- missing links between planes
+- missing who owns this decisions
+- places where the system works only because Sean remembers the ritual
+- places where a new operator would likely break it
+
+Rank them
+
+P0 — causes unsafeconfusing operation now
+P1 — major workflow drag  observability weakness
+P2 — polish or future leverage
+
+For each gap
+- current symptom
+- evidence
+- recommended remedy
+- which lane or plane should own the remedy
+
+============================================================
+MISSION 8 — RETURN WITH A HEAD-DEPARTMENT VERDICT
+============================================================
+
+Final report must include
+
+1. Executive summary
+2. What you inspected
+3. System map
+4. Recommended new laptop → full operations workflow
+5. Laneplane responsibility model
+6. Securitysafety doctrine
+7. Monitoringtransparency stack
+8. Tool-call failure handling standard
+9. Three or four example end-to-end workflows
+10. Gap matrix P0P1P2
+11. Recommended immediate changes for Sean’s actual practice
+12. Recommended changes for the repos  planes, clearly separated from operator habit changes
+13. What should be assigned next to
+    - Archivist
+    - Library
+    - Control Plane
+    - Research Intake
+    - KuCoin
+14. Whether the current ecosystem is
+    - governable enough for sustained work
+    - observable enough for sustained work
+    - fragile in specific ways
+15. Exact document files createdupdated, if any
+16. Verification performed
+17. Open uncertainties
+
+============================================================
+OPTIONAL DOCUMENT ARTIFACTS
+============================================================
+
+If the work supports it, create these kucoin-lane-local artifacts
+
+1. docsHEADLESS_MULTI_PLANE_OPERATOR_WORKFLOW.md
+2. docsHEADLESS_SECURITY_MONITORING_DOCTRINE.md
+3. docsMULTI_PLANE_GAP_MATRIX_2026-05-18.md
+
+or equivalent appropriately named docs if the repo has a better convention.
+
+Do not create unnecessary fluff.  
+Create them only if they materially improve operator continuity.
+
+============================================================
+IMPORTANT STYLE
+============================================================
+
+Do not give me generic DevOps advice.
+
+I want the advice grounded in this specific WE4FREE  Deliberate Ensemble  lane ecosystem
+- Archivist
+- Library
+- SwarmMind
+- Kernel
+- KuCoin
+- Control Plane
+- Research Intake
+- Federation where relevant
+
+Use concrete examples from visible artifacts when possible.
+Call out where evidence is weak or unavailable.
+
+This is your chance to behave like
+- my head developer
+- my security lead
+- my observability lead
+- my practical workflow architect
+
+and tell me plainly
+
+ Sean, this is how to run the whole thing without making yourself blind or letting the system lie to you.

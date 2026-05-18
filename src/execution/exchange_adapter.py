@@ -74,7 +74,7 @@ class KuCoinAdapter(ExchangeAdapter):
                 "kucoin-python not installed. Run: pip install python-kucoin"
             )
 
-        use_sandbox = os.getenv("KUCOIN_USE_SANDBOX", "false").lower() == "true"
+        use_sandbox = os.getenv("KUCOIN_USE_SANDBOX", "true").lower() == "true"
         base_url = (
             "https://openapi-sandbox.kucoin.com"
             if use_sandbox

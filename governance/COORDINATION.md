@@ -13,6 +13,35 @@ This document defines **which agent acts when**, **what triggers handoffs**, and
 
 ---
 
+## Lane-Relay SESSION_STATE Contract
+
+Execution runtime owner: `src/execution/execution_engine.py` (`run_continuous`, `shutdown`, heartbeat path).
+
+Contract source: `governance/lane-relay.json`
+- `session_state.path`: `lanes/kucoin/inbox/SESSION_STATE.json`
+- `session_state.written_every_cycle`: `true`
+
+Emission policy:
+- Write `SESSION_STATE.json` on every heartbeat transition:
+  - startup (`initializing`)
+  - pre-cycle (`running`)
+  - post-cycle (`running`)
+  - cycle error (`error`)
+  - sleeping interval (`sleeping`)
+  - shutdown (`shutdown`/`final`)
+- Persist terminal error status through shutdown when the final cycle failed.
+
+Minimum payload contract:
+- `lane` (`kucoin-lane`)
+- `cycle` (current cycle number)
+- `timestamp` (ISO-8601)
+- `mode` (executor class)
+- `status` (runtime status)
+- `phase` (`booting|active|standby|fault|terminating|unknown`)
+- `final` (boolean; `true` only on terminal shutdown write)
+
+---
+
 ## Core Coordination Rules
 
 ### Rule 1: Orchestrator Decides Direction, Within Risk Limits

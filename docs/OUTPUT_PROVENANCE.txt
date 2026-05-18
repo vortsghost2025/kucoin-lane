@@ -1,0 +1,465 @@
+OUTPUT_PROVENANCE:
+  agent: operator/exterior-assignment
+  lane: kucoin
+  generated_at: 2026-05-16T20:40:00-04:00
+  session_id: kucoin-long-run-task-packet
+  purpose: multi-hour-kucoin-lane-hardening-and-ratification
+
+# KUCOIN LANE — LONG-RUN HARDENING / RATIFICATION PACKET
+
+You have completed verification reconciliation and brought the lane to 302 passing tests on headless with the prior claim corrected.
+
+Continue immediately into a deeper KuCoin lane hardening pass.
+
+## Operating Rules
+
+- Do not place real trades.
+- Do not introduce any code path that can submit live orders without an explicit existing safety gate.
+- Prefer dry-run, simulation, replay, mock exchange, and contract-level validation.
+- Follow existing repository patterns.
+- Read before modifying.
+- Test after each meaningful work block.
+- Update journal with evidence, not vibes.
+- Correct any overclaims immediately.
+- Commit only verified working changes.
+- If you hit uncertainty about live KuCoin API behavior, document it and either:
+  - verify against existing project references/docs already present, or
+  - mark as external-doc verification needed rather than guessing.
+- Preserve/provide proper OUTPUT_PROVENANCE on your own final output and any agent-facing reports.
+
+---
+
+# Mission
+
+Turn `kucoin-lane` from “tests pass” into a more ratified, safety-bounded, auditable trading lane.
+
+Work through the priorities below in order. Complete as many as possible in this session without lowering verification quality.
+
+---
+
+# PRIORITY 1 — Full Lane Inventory + Truth Map
+
+Create or update a concise architecture/status artifact that answers:
+
+1. What are the current KuCoin lane modules?
+2. Which files own:
+   - exchange client/auth
+   - order creation
+   - cancellation
+   - balances/accounts
+   - symbols/market metadata
+   - strategy/routing
+   - execution guards
+   - journaling/evidence
+   - config/env
+   - tests
+3. Which modules are execution-path live vs. helper/dead/legacy?
+4. Which claims are already proven by tests?
+5. Which claims are merely implied by code and still need runtime proof?
+
+Deliverable:
+- `docs/KUCOIN_LANE_TRUTH_MAP.md` or the repo’s equivalent docs location.
+
+Evidence:
+- file references
+- test references
+- explicit “proven / partially proven / unverified”
+
+---
+
+# PRIORITY 2 — Live-Trade Safety Boundary Audit
+
+Audit every path that could ever lead to exchange mutation.
+
+Check for:
+- live order placement
+- market orders
+- limit orders
+- cancellation calls
+- withdrawal-like endpoints if any exist
+- balance transfer calls if any exist
+- mode flags that separate dry-run/sim/live
+- accidental default-to-live behavior
+- missing env validation
+- missing “paper mode” barriers
+
+Questions to answer:
+1. Is live mutation impossible unless explicitly configured?
+2. Are dangerous capabilities fail-closed if env is incomplete?
+3. Is there any path where a missing flag falls back to permissive execution?
+4. Are order methods reachable from generic orchestration without an explicit safety decision?
+
+If gaps exist:
+- fix them
+- add tests
+- document the safety posture
+
+Deliverable:
+- code changes if needed
+- `docs/KUCOIN_LIVE_MUTATION_BOUNDARY.md`
+
+Tests to add/update:
+- “no live order with absent live flag”
+- “no live order with malformed config”
+- “dry-run cannot call real mutation transport”
+- “simulation mode and live mode are structurally distinguishable”
+
+---
+
+# PRIORITY 3 — Exchange Client Reliability Hardening
+
+Inspect the KuCoin client / transport layer for:
+
+- timeout policy
+- retry policy
+- bounded retries
+- idempotency assumptions
+- retrying non-idempotent writes
+- HTTP error categorization
+- rate-limit handling
+- malformed response handling
+- timestamp / auth clock sensitivity
+- retry jitter/backoff if relevant
+
+If implementation is thin, strengthen it carefully.
+
+Deliverable:
+- reliability improvements with tests
+
+Tests:
+- retry on transient read failure
+- no blind retry of unsafe write unless explicitly proven safe
+- timeout produces controlled failure
+- malformed JSON / missing fields produce typed failure, not silent continuation
+- 429 / throttling path handled deterministically if existing architecture supports it
+
+---
+
+# PRIORITY 4 — Order Lifecycle State Machine Audit
+
+Build or verify the order lifecycle model.
+
+Expected conceptual states may include:
+- proposed
+- blocked
+- simulated
+- submitted
+- acknowledged
+- partially_filled
+- filled
+- cancel_requested
+- cancelled
+- rejected
+- failed
+- quarantined
+
+Do not force these names if the repo already has an equivalent model. Use the existing language where present.
+
+Work:
+1. Find actual order-state handling.
+2. Identify illegal transitions.
+3. Add/strengthen tests for transition correctness.
+4. Ensure failure states do not masquerade as completion.
+5. Ensure “unknown exchange response” cannot be classified as success.
+
+Deliverable:
+- transition tests
+- docs or inline contract notes
+- explicit gap list if the architecture currently lacks a true lifecycle model
+
+---
+
+# PRIORITY 5 — Risk Gate Inventory + Missing Guard Detection
+
+Map all current risk controls.
+
+Look for:
+- max order size
+- max symbol allocation
+- max daily loss
+- duplicate order suppression
+- position sizing limits
+- exposure cap
+- stale price data rejection
+- max slippage if applicable
+- “already have open order” suppression
+- strategy confidence thresholds if used
+
+Classify each:
+- implemented and tested
+- implemented but weakly tested
+- absent
+- intentionally out of scope
+
+If absent but clearly needed for a safe trading lane:
+- create a specific TODO artifact rather than inventing a half-baked implementation, unless the change is small and naturally fits the repo.
+
+Deliverable:
+- `docs/KUCOIN_RISK_GATE_MATRIX.md`
+
+---
+
+# PRIORITY 6 — Idempotency / Duplicate Submission Defense
+
+Search for any path where:
+- repeated orchestration messages
+- network retry
+- worker restart
+- duplicate inbox/task reprocessing
+could create duplicate exchange intent.
+
+Audit:
+- client order identifiers
+- operation fingerprints
+- replay keys
+- journal dedupe
+- “same task processed twice” protection
+
+If already present:
+- prove it with tests.
+
+If missing:
+- implement the smallest clean guard available within current architecture, or document the exact gap with a proposed contract.
+
+Tests:
+- duplicate execution request cannot create two distinct mutating intents in dry-run/sim transport
+- repeated same task produces deterministic dedupe/block behavior
+- restart/replay scenario is handled or explicitly unhandled
+
+---
+
+# PRIORITY 7 — Balance / Position / PnL Reconciliation Truth Check
+
+Map the lane’s handling of:
+- available balance
+- held/locked balance
+- position-like state if applicable
+- executed fills
+- realized/unrealized tracking if present
+- how internal state reconciles with external exchange state
+
+Questions:
+1. Can internal state drift from exchange state?
+2. Is there a reconciliation routine?
+3. Is it tested?
+4. Is stale or partial remote data detectable?
+
+Deliverable:
+- concise reconciliation status doc
+- tests or TODOs based on what exists
+
+---
+
+# PRIORITY 8 — Market Data Freshness + Staleness Gates
+
+Find every decision path that relies on:
+- ticker
+- candles
+- orderbook
+- price snapshots
+- symbol metadata
+
+Verify:
+- stale data detection exists or is explicitly missing
+- time source is handled consistently
+- stale data does not silently feed execution decisions
+
+Tests:
+- stale market data blocks any execution decision that depends on it
+- missing timestamp fails closed where necessary
+- fresh data path continues normally
+
+If architecture doesn’t yet support this:
+- produce a clean design/TODO with exact insertion points.
+
+---
+
+# PRIORITY 9 — Config / Secret / Environment Audit
+
+Audit repository config handling for:
+- API key reads
+- secret names
+- accidental logs of secrets
+- `.env` examples
+- test fixture contamination
+- dev vs headless differences
+- optional vs required vars
+- crash-on-missing vs silent fallback
+
+Deliverable:
+- fix any unsafe logging
+- normalize env validation if clearly needed
+- update example config docs
+- record verified config expectations in docs
+
+Tests:
+- secrets are not printed in known error/report paths
+- missing required config fails clearly
+- test config does not accidentally imply live trading enabled
+
+---
+
+# PRIORITY 10 — Provenance / Journal / Evidence Conformance
+
+Since this lane is part of a governance lattice, audit whether its own generated artifacts are sufficiently self-identifying.
+
+Check:
+- agent outputs
+- journal updates
+- verification summaries
+- generated reports
+- any lane-facing evidence files
+
+Confirm they include or conform to the required provenance/output contract used by the current repo conventions.
+
+If gaps exist:
+- fix helpers/templates where appropriate
+- regenerate one representative artifact
+- verify it passes the existing contract checker if one applies here
+
+Deliverable:
+- evidence-backed conclusion:
+  - “KuCoin lane report outputs conform”
+  - or “these exact remaining files/helpers do not yet conform”
+
+---
+
+# PRIORITY 11 — Test Suite Ratification Pass
+
+You just proved 302 tests on headless.
+
+Now improve the quality of that proof:
+1. Categorize tests by subsystem:
+   - auth/client
+   - risk
+   - strategy
+   - order lifecycle
+   - journal/provenance
+   - config
+   - integration
+2. Identify any important subsystem with surprisingly few tests.
+3. Add high-value tests only where there is a clear gap.
+4. Produce a test coverage map by behavior, even if not literal percentage coverage.
+
+Deliverable:
+- `docs/KUCOIN_TEST_RATIFICATION.md`
+
+---
+
+# PRIORITY 12 — Headless/Local Parity Guard Follow-Up
+
+The prior reconciliation found:
+- local and headless working trees were not identical
+- Python version differences explained warning behavior
+
+Now formalize this into a lane hygiene check:
+- document the exact parity lesson
+- identify whether a lightweight verification script or doc checklist should be added
+- prevent future “identical tree” overclaims
+
+Deliverable:
+- journal note
+- optional script/checklist if naturally warranted
+
+---
+
+# PRIORITY 13 — Runtime Smoke Pack
+
+Create or improve a safe smoke pack that can validate:
+- config load
+- dry-run mode active
+- non-mutating client init
+- representative route through analysis/decision path
+- no actual order submission
+- report generated with provenance
+
+This should be easy for the operator to run manually later.
+
+Deliverable:
+- script or documented command sequence
+- expected output
+- clear PASS/FAIL interpretation
+
+---
+
+# PRIORITY 14 — Documentation Cleanup / Operator Runbook
+
+Write or improve a KuCoin lane runbook for future Sean/operator use:
+
+Must answer:
+1. How do I run tests?
+2. How do I verify dry-run safety?
+3. How do I run headless verification?
+4. How do I inspect the journal?
+5. How do I tell if the lane is safe to continue?
+6. What claims are currently proven?
+7. What is still not proven?
+
+Deliverable:
+- `docs/KUCOIN_OPERATOR_RUNBOOK.md`
+
+---
+
+# PRIORITY 15 — Final Journal + Commit Discipline
+
+At the end:
+
+1. Run the relevant test suite.
+2. Report exact counts.
+3. Report exact modified files.
+4. Report exact new docs/tests.
+5. Explicitly distinguish:
+   - completed
+   - partially completed
+   - deferred with reason
+6. Update the journal with timestamps and evidence refs.
+7. Commit only if the worktree is coherent and tests pass.
+8. Final output must include proper OUTPUT_PROVENANCE.
+
+---
+
+# Stretch Priorities If Time Remains
+
+Only after the above are addressed:
+
+## Stretch A — Exchange Fixture Contract Cleanup
+Normalize mocked KuCoin API fixture shape and ensure all tests use contract-consistent examples.
+
+## Stretch B — Error Taxonomy
+Create typed categories for:
+- auth error
+- connectivity error
+- stale data error
+- risk block
+- config block
+- invalid order spec
+- unknown exchange response
+
+## Stretch C — Execution Proof Packet
+Create a single evidence markdown report summarizing:
+- safety bounds
+- test counts
+- dry-run guarantees
+- remaining unproven claims
+
+## Stretch D — TODO Backlog Canonicalization
+Consolidate scattered TODOs into one lane-local durable tracker with:
+- ID
+- priority
+- proof needed
+- file anchor
+- completion condition
+
+---
+
+# Minimum Acceptable Session Outcome
+
+Even if not everything is completed, this session must end with:
+
+- at least 3 substantial hardening priorities completed
+- exact test result
+- exact docs/artifacts created
+- exact gaps remaining
+- no overclaims
+- final journal update
+- proper provenance in final response

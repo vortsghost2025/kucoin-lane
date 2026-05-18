@@ -55,3 +55,4 @@ Thumbs.db
 htmlcov/
 .venv/
 venv/
+.local-backup/

@@ -32,9 +32,11 @@ Dockerfile
 ```
 
 ## Lane-Relay
-- Inbox: `S:/Archivist-Agent/inbox/kucoin-lane/`
-- Outbox: `S:/Archivist-Agent/outbox/kucoin-lane/`
-- SESSION_STATE.json written every cycle
+- Inbox: `S:/Archivist-Agent/lanes/kucoin/inbox/`
+- Outbox: `S:/Archivist-Agent/lanes/kucoin/outbox/`
+- SESSION_STATE path: `lanes/kucoin/inbox/SESSION_STATE.json`
+- SESSION_STATE is written on every runtime heartbeat transition (startup, pre-cycle, post-cycle, error, sleeping, shutdown)
+- SESSION_STATE includes required contract fields: `lane`, `cycle`, `timestamp`, `mode`, `status`, `phase`, `final`
 
 ## Governance
 - Follows GLOBAL_GOVERNANCE.md (7 universal laws)

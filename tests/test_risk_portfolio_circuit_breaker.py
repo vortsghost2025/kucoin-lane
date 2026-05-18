@@ -69,8 +69,8 @@ class TestPortfolioCircuitBreaker:
         assert pcb.trip_reason == ""
         assert pcb.trip_time is None
 
-    def test_starting_equity_clamped_to_zero(self, state_path):
-        pcb = PortfolioCircuitBreaker(starting_equity=-100, state_path=state_path)
+    def test_starting_equity_clamped_to_zero(self):
+        pcb = PortfolioCircuitBreaker(starting_equity=-100)
         assert pcb.starting_equity == 0
         assert pcb.equity_peak == 0
 

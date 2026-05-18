@@ -38,8 +38,22 @@ from ..config import (
     LIVE_TRADING,
 )
 from .exchange_adapter import ExchangeAdapter, KuCoinAdapter
+from ..risk.circuit_breaker import CircuitBreaker
+from ..risk.portfolio_circuit_breaker import PortfolioCircuitBreaker
 
 logger = logging.getLogger(__name__)
+
+LANE_NAME = "kucoin-lane"
+SESSION_STATE_REL_PATH = os.path.join("lanes", "kucoin", "inbox", "SESSION_STATE.json")
+
+PHASE_MAP = {
+    "initializing": "booting",
+    "running": "active",
+    "error": "fault",
+    "sleeping": "standby",
+    "shutdown": "terminating",
+    "final": "terminating",
+}
 
 
 def send_telegram_notification(message: str) -> bool:
@@ -100,6 +114,7 @@ class ExecutionEngine(ABC):
         self.total_trades = 0
         self.winning_trades = 0
         self.losing_trades = 0
+        self._last_runtime_status: str = "initializing"
         logger.info(
             f"ExecutionEngine initialized - using heartbeat: {self.heartbeat_file}"
         )
@@ -192,6 +207,30 @@ class ExecutionEngine(ABC):
         except Exception as e:
             logger.warning(f"Failed to write heartbeat: {e}")
 
+    def write_session_state(self, status: str, final: bool = False):
+        self._last_runtime_status = status
+        phase = PHASE_MAP.get(status, "unknown")
+        payload = {
+            "lane": LANE_NAME,
+            "cycle": self.cycle_count,
+            "timestamp": datetime.now().isoformat(),
+            "mode": self.__class__.__name__,
+            "executor_class": self.__class__.__name__,
+            "status": status,
+            "runtime_status": status,
+            "phase": phase,
+            "final": final,
+            "step": "session_state",
+            "pid": os.getpid(),
+            "uptime_seconds": (datetime.now() - self.start_time).total_seconds(),
+        }
+        try:
+            os.makedirs(os.path.dirname(SESSION_STATE_REL_PATH), exist_ok=True)
+            with open(SESSION_STATE_REL_PATH, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2)
+        except Exception as e:
+            logger.warning(f"Failed to write SESSION_STATE: {e}")
+
     def log(self, level: str, msg: str):
         getattr(logger, level.lower())(f"[{self.__class__.__name__}] {msg}")
 
@@ -205,6 +244,7 @@ class ExecutionEngine(ABC):
             f"Starting continuous monitoring loop (every {interval_minutes} minutes)",
         )
         self.write_heartbeat("initializing", "startup")
+        self.write_session_state("initializing")
 
         mode_name = "LIVE_TRADING" if "Live" in self.__class__.__name__ else "DRY_RUN"
         start_msg = (
@@ -224,12 +264,15 @@ class ExecutionEngine(ABC):
                     self.cycle_count += 1
                     self.log("info", f"=== CYCLE {self.cycle_count} START ===")
                     self.write_heartbeat("running", "pre_cycle")
+                    self.write_session_state("running")
                     self.run_cycle()
                     self.log("info", f"=== CYCLE {self.cycle_count} COMPLETE ===")
                     self.write_heartbeat("running", "post_cycle")
+                    self.write_session_state("running")
                 except Exception as e:
                     self.log("error", f"Cycle error: {str(e)}")
                     self.write_heartbeat("error", type(e).__name__)
+                    self.write_session_state("error")
 
                 sleep_seconds = interval_minutes * 60
                 self.log("info", f"Sleeping {interval_minutes}m until next cycle...")
@@ -238,6 +281,8 @@ class ExecutionEngine(ABC):
                         break
                     time.sleep(min(10, sleep_seconds - i))
                     self.write_heartbeat("sleeping", f"interval_{i}s")
+                if sleep_seconds > 0 and self._last_runtime_status != "error":
+                    self.write_session_state("sleeping")
 
         except KeyboardInterrupt:
             self.log("info", "Keyboard interrupt received")
@@ -247,7 +292,11 @@ class ExecutionEngine(ABC):
     def shutdown(self):
         self.log("info", "Shutting down execution engine")
         self.is_running = False
-        self.write_heartbeat("shutdown", "final", final=True)
+        self.write_heartbeat("shutdown", "final")
+        if self._last_runtime_status == "error":
+            self.write_session_state("error", final=True)
+        else:
+            self.write_session_state("shutdown", final=True)
 
         mode_name = "LIVE_TRADING" if "Live" in self.__class__.__name__ else "DRY_RUN"
         uptime_seconds = (datetime.now() - self.start_time).total_seconds()
@@ -509,6 +558,8 @@ class LiveExecutor(ExecutionEngine):
         self.min_balance_usd = config.get("min_balance_usd")
         self.order_type = config.get("order_type", "market")
         self.adapter: Optional[ExchangeAdapter] = None
+        self.circuit_breaker = CircuitBreaker()
+        self.portfolio_circuit_breaker = PortfolioCircuitBreaker()
         self._initialize_adapter()
 
     def _initialize_adapter(self):
@@ -596,7 +647,34 @@ class LiveExecutor(ExecutionEngine):
         position_approved = input_data.get("position_approved", None)
         risk_approved = input_data.get("risk_approved", None)
 
-        if position_approved is False or risk_approved is False:
+        if (
+            getattr(self, "circuit_breaker", None)
+            and self.circuit_breaker.is_triggered()
+        ):
+            return {
+                "agent": "LiveExecutor",
+                "action": "execute_trade",
+                "success": True,
+                "data": {
+                    "trade_executed": False,
+                    "reason": "Circuit breaker triggered",
+                },
+            }
+        if (
+            getattr(self, "portfolio_circuit_breaker", None)
+            and self.portfolio_circuit_breaker.is_triggered()
+        ):
+            return {
+                "agent": "LiveExecutor",
+                "action": "execute_trade",
+                "success": True,
+                "data": {
+                    "trade_executed": False,
+                    "reason": "Portfolio circuit breaker triggered",
+                },
+            }
+
+        if not position_approved or not risk_approved:
             return {
                 "agent": "LiveExecutor",
                 "action": "execute_trade",
@@ -661,6 +739,34 @@ class LiveExecutor(ExecutionEngine):
                 except Exception as e:
                     self.log("error", f"CRITICAL: Failed to place stop-loss: {e}")
 
+                try:
+                    if order_details and isinstance(order_details, dict):
+                        order_id = order_details.get("orderId") or order_details.get(
+                            "order_id"
+                        )
+                        if order_id:
+                            self.adapter.cancel_order(
+                                symbol=pair, order_id=str(order_id)
+                            )
+                            self.log(
+                                "warning",
+                                f"Entry order {order_id} cancelled after SL failure",
+                            )
+                except Exception as cancel_err:
+                    self.log(
+                        "error",
+                        f"Failed to cancel entry order after SL failure: {cancel_err}",
+                    )
+                return {
+                    "agent": "LiveExecutor",
+                    "action": "execute_trade",
+                    "success": False,
+                    "data": {
+                        "trade_executed": False,
+                        "reason": "Stop-loss placement failed, entry order unwound",
+                    },
+                }
+
             if take_profit > 0:
                 try:
                     tp_details = self.adapter.place_take_profit(
@@ -669,6 +775,32 @@ class LiveExecutor(ExecutionEngine):
                     self.log("info", f"Take-profit placed: {tp_details}")
                 except Exception as e:
                     self.log("error", f"CRITICAL: Failed to place take-profit: {e}")
+
+                try:
+                    if order_details and isinstance(order_details, dict):
+                        oid = order_details.get("orderId") or order_details.get(
+                            "order_id"
+                        )
+                        if oid:
+                            self.adapter.cancel_order(symbol=pair, order_id=str(oid))
+                            self.log(
+                                "warning",
+                                f"Entry order {oid} cancelled after TP failure",
+                            )
+                except Exception as cancel_err2:
+                    self.log(
+                        "error",
+                        f"Failed to cancel entry order after TP failure: {cancel_err2}",
+                    )
+                return {
+                    "agent": "LiveExecutor",
+                    "action": "execute_trade",
+                    "success": False,
+                    "data": {
+                        "trade_executed": False,
+                        "reason": "Take-profit placement failed, entry order unwound",
+                    },
+                }
 
         except Exception as e:
             error_msg = f"Live order failed: {str(e)}"
@@ -814,6 +946,10 @@ def select_executor(dry_run: bool, live_trading: bool) -> ExecutionEngine:
         "live_trading": live_trading,
         "position_size_usd": float(POSITION_SIZE_USD),
         "monitor_interval_min": int(MONITOR_INTERVAL_MIN),
+        "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "10.0")),
+        "max_trade_loss_usd": float(os.getenv("MAX_TRADE_LOSS_USD", "5.0")),
+        "max_daily_loss_usd": float(os.getenv("MAX_DAILY_LOSS_USD", "10.0")),
+        "min_balance_usd": float(os.getenv("MIN_BALANCE_USD", "10.0")),
     }
 
     if dry_run:
