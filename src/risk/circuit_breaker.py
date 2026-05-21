@@ -90,6 +90,9 @@ class CircuitBreaker:
 
         return True, f"Healthy (PnL drop: {pnl_drop_pct:.1f}%)"
 
+    def is_triggered(self) -> bool:
+        return self.is_tripped
+
     def reset(self):
         self.pnl_history.clear()
         self.is_tripped = False

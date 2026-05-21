@@ -31,7 +31,10 @@ import pandas as pd
 
 from ..base_agent import BaseAgent, AgentStatus
 from ..config import REGIME_GUARD_MODE
-from ..risk.portfolio_circuit_breaker import PortfolioCircuitBreaker, CircuitBreakTriggered
+from ..risk.portfolio_circuit_breaker import (
+    PortfolioCircuitBreaker,
+    CircuitBreakTriggered,
+)
 from .regime_detector import RegimeDetector
 from .lead_lag import LeadLagMonitor
 from .whale_watch import WhaleWatch
@@ -97,7 +100,9 @@ class IntelligenceOrchestrator(BaseAgent):
         self.pause_reason: Optional[str] = None
         self.pause_timestamp: Optional[datetime] = None
         self.resume_warning_given = False
+        self._cb_state_path = os.getenv("CB_STATE_PATH", "cb_state.json")
         self.circuit_breaker_active = False
+        self._load_cb_state()
         self.agent_registry: Dict[str, BaseAgent] = {}
         self.is_paper_trading = config.get("paper_trading", True)
         self._last_daily_reset: Optional[str] = None
@@ -165,7 +170,45 @@ class IntelligenceOrchestrator(BaseAgent):
         self.trading_paused = True
         self.pause_reason = f"Circuit breaker: {reason}"
         self.set_status(AgentStatus.ERROR, f"Circuit breaker activated: {reason}")
+        self._persist_cb_state(reason)
         self.logger.critical(f"[CRITICAL] CIRCUIT BREAKER ACTIVATED: {reason}")
+
+    def _load_cb_state(self) -> None:
+        try:
+            if os.path.exists(self._cb_state_path):
+                with open(self._cb_state_path, "r") as f:
+                    state = json.load(f)
+                if state.get("active"):
+                    self.circuit_breaker_active = True
+                    self.trading_paused = True
+                    self.pause_reason = (
+                        f"Circuit breaker (persisted): {state.get('reason', 'unknown')}"
+                    )
+                    self.logger.warning(
+                        f"[WARN] Restored circuit breaker state from {self._cb_state_path}: {state.get('reason')}"
+                    )
+        except Exception:
+            pass
+
+    def _persist_cb_state(self, reason: str = "") -> None:
+        state = {
+            "active": self.circuit_breaker_active,
+            "reason": reason,
+            "timestamp": time.time(),
+        }
+        try:
+            with open(self._cb_state_path, "w") as f:
+                json.dump(state, f, indent=2)
+        except Exception:
+            pass
+
+    def reset_circuit_breaker(self, reason: str = "Manual reset") -> None:
+        self.circuit_breaker_active = False
+        self.trading_paused = False
+        self.pause_reason = None
+        self._persist_cb_state("")
+        self.set_status(AgentStatus.IDLE)
+        self.logger.info(f"[INFO] Circuit breaker reset: {reason}")
 
     def is_trading_allowed(self) -> tuple[bool, Optional[str]]:
         if self.circuit_breaker_active:
@@ -864,9 +907,7 @@ class IntelligenceOrchestrator(BaseAgent):
                     self.logger.critical(
                         f"POST-CYCLE AUDIT FAILED: {violation_summary}"
                     )
-                    self.activate_circuit_breaker(
-                        f"Audit failed: {violation_summary}"
-                    )
+                    self.activate_circuit_breaker(f"Audit failed: {violation_summary}")
 
                 try:
                     self.portfolio_cb.check(self._account_balance)
@@ -963,7 +1004,10 @@ class IntelligenceOrchestrator(BaseAgent):
             "uptime_seconds": round(uptime, 2),
         }
         try:
-            with open(f"bot_heartbeat_{'dry_run' if self.is_paper_trading else 'live'}.json", "w") as f:
+            with open(
+                f"bot_heartbeat_{'dry_run' if self.is_paper_trading else 'live'}.json",
+                "w",
+            ) as f:
                 json.dump(heartbeat, f)
         except Exception:
             pass

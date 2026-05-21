@@ -19,6 +19,7 @@ bot_heartbeat.json
 shutdown_state.json
 SESSION_STATE.json
 portfolio_cb_state.json
+cb_state.json
 checkpoint.pkl
 
 # Logs

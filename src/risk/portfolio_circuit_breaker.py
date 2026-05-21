@@ -124,6 +124,9 @@ class PortfolioCircuitBreaker:
 
         self._persist(dt.date.today().isoformat())
 
+    def is_triggered(self) -> bool:
+        return self.tripped
+
     def reset(self) -> None:
         self.tripped = False
         self.trip_reason = ""

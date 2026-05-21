@@ -3,7 +3,10 @@ import json
 import tempfile
 import time
 import pytest
-from src.risk.portfolio_circuit_breaker import PortfolioCircuitBreaker, CircuitBreakTriggered
+from src.risk.portfolio_circuit_breaker import (
+    PortfolioCircuitBreaker,
+    CircuitBreakTriggered,
+)
 
 
 class TestPortfolioCircuitBreaker:
@@ -69,21 +72,27 @@ class TestPortfolioCircuitBreaker:
         assert pcb.trip_reason == ""
         assert pcb.trip_time is None
 
-    def test_starting_equity_clamped_to_zero(self):
-        pcb = PortfolioCircuitBreaker(starting_equity=-100)
+    def test_starting_equity_clamped_to_zero(self, state_path):
+        pcb = PortfolioCircuitBreaker(starting_equity=-100, state_path=state_path)
         assert pcb.starting_equity == 0
         assert pcb.equity_peak == 0
 
     def test_state_persists_and_loads(self, state_path):
         pcb1 = PortfolioCircuitBreaker(
-            starting_equity=10000.0, max_drawdown_pct=10.0, max_daily_loss_pct=6.0,
-            cooldown_minutes=60, state_path=state_path,
+            starting_equity=10000.0,
+            max_drawdown_pct=10.0,
+            max_daily_loss_pct=6.0,
+            cooldown_minutes=60,
+            state_path=state_path,
         )
         pcb1.check(11000.0)
         assert pcb1.equity_peak == 11000.0
 
         pcb2 = PortfolioCircuitBreaker(
-            starting_equity=10000.0, max_drawdown_pct=10.0, max_daily_loss_pct=6.0,
-            cooldown_minutes=60, state_path=state_path,
+            starting_equity=10000.0,
+            max_drawdown_pct=10.0,
+            max_daily_loss_pct=6.0,
+            cooldown_minutes=60,
+            state_path=state_path,
         )
         assert pcb2.equity_peak == 11000.0

@@ -1,4 +1,5 @@
 import os
+import tempfile
 import pytest
 from unittest.mock import patch, MagicMock, PropertyMock
 import pandas as pd
@@ -20,18 +21,31 @@ class MockAgent(BaseAgent):
 
 class TestIntelligenceOrchestrator:
     @pytest.fixture
-    def orchestrator(self):
-        return IntelligenceOrchestrator({
-            "enable_regime": False,
-            "enable_lead_lag": False,
-            "enable_whale": False,
-            "paper_trading": True,
-        })
+    def orchestrator(self, tmp_path):
+        cb_state_file = str(tmp_path / "cb_state.json")
+        portfolio_cb_file = str(tmp_path / "portfolio_cb_state.json")
+        with patch.dict(
+            os.environ,
+            {
+                "CB_STATE_PATH": cb_state_file,
+                "PORTFOLIO_CB_STATE_PATH": portfolio_cb_file,
+            },
+        ):
+            return IntelligenceOrchestrator(
+                {
+                    "enable_regime": False,
+                    "enable_lead_lag": False,
+                    "enable_whale": False,
+                    "paper_trading": True,
+                }
+            )
 
     def test_init(self, orchestrator):
         assert orchestrator.agent_name == "IntelligenceOrchestrator"
         assert orchestrator.enabled_modules == {
-            "regime": False, "lead_lag": False, "whale": False,
+            "regime": False,
+            "lead_lag": False,
+            "whale": False,
         }
         assert orchestrator.current_stage == WorkflowStage.IDLE
         assert orchestrator.trading_paused is False
@@ -93,7 +107,9 @@ class TestIntelligenceOrchestrator:
 
     def test_validate_agent_output_missing_keys(self, orchestrator):
         result = {"success": True, "data": {"key": "value"}}
-        assert orchestrator._validate_agent_output(result, "Agent", ["missing"]) is False
+        assert (
+            orchestrator._validate_agent_output(result, "Agent", ["missing"]) is False
+        )
 
     def test_validate_agent_output_failed_ok(self, orchestrator):
         result = {"success": False, "error": "fail"}
@@ -130,10 +146,13 @@ class TestIntelligenceOrchestrator:
         assert "oops" in result["error"]
 
     def test_handle_notional_rejection_below_threshold(self, orchestrator):
-        result = orchestrator._handle_notional_rejection("below minimum notional", {
-            "assessments": {"SOL/USDT": {"pair": "SOL/USDT"}},
-            "account_balance": 100,
-        })
+        result = orchestrator._handle_notional_rejection(
+            "below minimum notional",
+            {
+                "assessments": {"SOL/USDT": {"pair": "SOL/USDT"}},
+                "account_balance": 100,
+            },
+        )
         assert orchestrator.consecutive_notional_rejections == 1
         assert result["success"] is True
         assert result["data"]["reason"] == "notional_rejection"
@@ -141,72 +160,105 @@ class TestIntelligenceOrchestrator:
     def test_handle_notional_rejection_at_threshold(self, orchestrator):
         orchestrator.notional_rejection_threshold = 3
         for _ in range(2):
-            orchestrator._handle_notional_rejection("below minimum notional", {
+            orchestrator._handle_notional_rejection(
+                "below minimum notional",
+                {
+                    "assessments": {"SOL/USDT": {"pair": "SOL/USDT"}},
+                    "account_balance": 100,
+                },
+            )
+        assert orchestrator.consecutive_notional_rejections == 2
+        result = orchestrator._handle_notional_rejection(
+            "below minimum notional",
+            {
                 "assessments": {"SOL/USDT": {"pair": "SOL/USDT"}},
                 "account_balance": 100,
-            })
-        assert orchestrator.consecutive_notional_rejections == 2
-        result = orchestrator._handle_notional_rejection("below minimum notional", {
-            "assessments": {"SOL/USDT": {"pair": "SOL/USDT"}},
-            "account_balance": 100,
-        })
+            },
+        )
         assert result["data"]["reason"] == "notional_rejection_pause"
         assert orchestrator.trading_paused is True
 
     def test_make_decision_baseline_hold(self, orchestrator):
-        action, conf, mult, reasoning = orchestrator._make_decision({
-            "regime": {"recommendation": "USE_RSI", "adx": 15, "atr_pct": 0.02},
-            "lead_lag": None,
-            "whale": None,
-        })
+        action, conf, mult, reasoning = orchestrator._make_decision(
+            {
+                "regime": {"recommendation": "USE_RSI", "adx": 15, "atr_pct": 0.02},
+                "lead_lag": None,
+                "whale": None,
+            }
+        )
         assert action == "HOLD"
         assert mult == 1.0
 
     def test_make_decision_lead_lag_danger(self, orchestrator):
-        action, conf, mult, reasoning = orchestrator._make_decision({
-            "regime": None,
-            "lead_lag": {"signal": "DANGER"},
-            "whale": None,
-        })
+        action, conf, mult, reasoning = orchestrator._make_decision(
+            {
+                "regime": None,
+                "lead_lag": {"signal": "DANGER"},
+                "whale": None,
+            }
+        )
         assert action == "EXIT_ALL"
         assert mult == 0.0
 
     def test_make_decision_whale_absorption(self, orchestrator):
-        action, conf, mult, reasoning = orchestrator._make_decision({
-            "regime": {"recommendation": "USE_RSI", "adx": 15, "atr_pct": 0.02},
-            "lead_lag": None,
-            "whale": {"signal": "BULLISH_ABSORPTION", "confidence": 0.8, "cvd_ratio": 0.7},
-        })
+        action, conf, mult, reasoning = orchestrator._make_decision(
+            {
+                "regime": {"recommendation": "USE_RSI", "adx": 15, "atr_pct": 0.02},
+                "lead_lag": None,
+                "whale": {
+                    "signal": "BULLISH_ABSORPTION",
+                    "confidence": 0.8,
+                    "cvd_ratio": 0.7,
+                },
+            }
+        )
         assert action == "BUY"
 
     def test_make_decision_whale_distribution(self, orchestrator):
-        action, conf, mult, reasoning = orchestrator._make_decision({
-            "regime": {"recommendation": "USE_RSI", "adx": 15, "atr_pct": 0.02},
-            "lead_lag": None,
-            "whale": {"signal": "BEARISH_DISTRIBUTION", "confidence": 0.8},
-        })
+        action, conf, mult, reasoning = orchestrator._make_decision(
+            {
+                "regime": {"recommendation": "USE_RSI", "adx": 15, "atr_pct": 0.02},
+                "lead_lag": None,
+                "whale": {"signal": "BEARISH_DISTRIBUTION", "confidence": 0.8},
+            }
+        )
         assert action == "SELL"
 
     def test_make_decision_high_volatility(self, orchestrator):
-        action, conf, mult, reasoning = orchestrator._make_decision({
-            "regime": {"recommendation": "REDUCE_SIZE", "adx": 15, "atr_pct": 0.05},
-            "lead_lag": None,
-            "whale": None,
-        })
+        action, conf, mult, reasoning = orchestrator._make_decision(
+            {
+                "regime": {"recommendation": "REDUCE_SIZE", "adx": 15, "atr_pct": 0.05},
+                "lead_lag": None,
+                "whale": None,
+            }
+        )
         assert action == "HOLD"
         assert mult == 0.5
 
     def test_should_allow_rsi_buy_true(self, orchestrator):
-        assert orchestrator.should_allow_rsi_buy({"action": "HOLD", "position_multiplier": 0.5}) is True
+        assert (
+            orchestrator.should_allow_rsi_buy(
+                {"action": "HOLD", "position_multiplier": 0.5}
+            )
+            is True
+        )
 
     def test_should_allow_rsi_buy_false(self, orchestrator):
-        assert orchestrator.should_allow_rsi_buy({"action": "HOLD", "position_multiplier": 0.0}) is False
+        assert (
+            orchestrator.should_allow_rsi_buy(
+                {"action": "HOLD", "position_multiplier": 0.0}
+            )
+            is False
+        )
 
     def test_should_emergency_exit_true(self, orchestrator):
         assert orchestrator.should_emergency_exit({"action": "EXIT_ALL"}) is True
 
     def test_get_position_size_adjustment(self, orchestrator):
-        assert orchestrator.get_position_size_adjustment({"position_multiplier": 0.5}) == 0.5
+        assert (
+            orchestrator.get_position_size_adjustment({"position_multiplier": 0.5})
+            == 0.5
+        )
 
     def test_get_system_status(self, orchestrator):
         status = orchestrator.get_system_status()
@@ -219,27 +271,41 @@ class TestIntelligenceOrchestrator:
         assert mult == 0.25
 
     def test_v2_two_candle_first(self, orchestrator):
-        action, conf, mult, reasoning = orchestrator._handle_v2_two_candle({"adx": 30}, "SOL/USDT")
+        action, conf, mult, reasoning = orchestrator._handle_v2_two_candle(
+            {"adx": 30}, "SOL/USDT"
+        )
         assert mult == 0.5
-        action2, conf2, mult2, reasoning2 = orchestrator._handle_v2_two_candle({"adx": 30}, "SOL/USDT")
+        action2, conf2, mult2, reasoning2 = orchestrator._handle_v2_two_candle(
+            {"adx": 30}, "SOL/USDT"
+        )
         assert mult2 == 0.0
 
     def test_v3_cooldown(self, orchestrator):
         import time
+
         orchestrator.cooldown_override_active["SOL/USDT"] = time.time()
-        action, conf, mult, reasoning = orchestrator._handle_v3_cooldown({"adx": 30}, "SOL/USDT")
+        action, conf, mult, reasoning = orchestrator._handle_v3_cooldown(
+            {"adx": 30}, "SOL/USDT"
+        )
         assert mult == 0.0
 
     def test_v3_cooldown_expired(self, orchestrator):
         import time
+
         orchestrator.cooldown_override_active["SOL/USDT"] = time.time() - 14400 - 1
-        action, conf, mult, reasoning = orchestrator._handle_v3_cooldown({"adx": 30}, "SOL/USDT")
+        action, conf, mult, reasoning = orchestrator._handle_v3_cooldown(
+            {"adx": 30}, "SOL/USDT"
+        )
         assert mult == 0.5
 
     def test_v4_threshold_high_adx(self, orchestrator):
-        action, conf, mult, reasoning = orchestrator._handle_v4_threshold({"adx": 55}, "SOL/USDT")
+        action, conf, mult, reasoning = orchestrator._handle_v4_threshold(
+            {"adx": 55}, "SOL/USDT"
+        )
         assert mult == 0.0
 
     def test_v4_threshold_low_adx(self, orchestrator):
-        action, conf, mult, reasoning = orchestrator._handle_v4_threshold({"adx": 45}, "SOL/USDT")
+        action, conf, mult, reasoning = orchestrator._handle_v4_threshold(
+            {"adx": 45}, "SOL/USDT"
+        )
         assert mult == 0.5
