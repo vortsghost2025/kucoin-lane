@@ -6,11 +6,8 @@ Enforces strict risk controls: never risk more than 1% of capital per trade.
 
 from typing import Any, Dict, Optional
 import logging
-import sys
-import os
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from base_agent import BaseAgent, AgentStatus
+from ..base_agent import BaseAgent, AgentStatus
 
 MAX_DAILY_LOSS_CAP = 0.02
 DEFAULT_MIN_POSITION_SIZE_UNITS = 0.001

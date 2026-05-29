@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class KuCoinUTAValidator:
     """Validates KuCoin Unified Account access and balance visibility."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.api_key = os.getenv("KUCOIN_API_KEY")
         self.api_secret = os.getenv("KUCOIN_API_SECRET")
         self.api_passphrase = os.getenv("KUCOIN_API_PASSPHRASE")

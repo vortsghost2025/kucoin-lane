@@ -21,7 +21,7 @@ class ExchangeAdapter(ABC):
 
     def __init__(
         self, exchange_name: str, base_url: str, api_key: str, api_secret: str, **kwargs
-    ):
+    ) -> None:
         self.exchange_name = exchange_name
         self.base_url = base_url
         self.api_key = api_key
@@ -66,7 +66,7 @@ class ExchangeAdapter(ABC):
 class KuCoinAdapter(ExchangeAdapter):
     """KuCoin exchange adapter using python-kucoin SDK."""
 
-    def __init__(self, api_key: str, api_secret: str, passphrase: str):
+    def __init__(self, api_key: str, api_secret: str, passphrase: str) -> None:
         try:
             from kucoin.client import Client as KuCoinClient
         except ImportError:

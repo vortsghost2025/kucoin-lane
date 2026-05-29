@@ -18,7 +18,7 @@ import signal
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ class CheckpointManager:
             logger.error("Failed to load checkpoint %s: %s", checkpoint_path, exc)
             return None
 
-    def list_checkpoints(self) -> list:
+    def list_checkpoints(self) -> List:
         ckpts = sorted(self.state_dir.glob("*.ckpt"))
         return [c.stem for c in ckpts]
 

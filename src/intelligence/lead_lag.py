@@ -59,7 +59,7 @@ class LeadLagMonitor:
         self.on_danger_callback: Optional[Callable] = None
         self.on_warning_callback: Optional[Callable] = None
 
-    async def start(self):
+    async def start(self) -> None:
         """Start WebSocket connection to Binance"""
         self.running = True
         uri = "wss://fstream.binance.com/ws/btcusdt@aggTrade"
@@ -173,7 +173,7 @@ class LeadLagMonitor:
             except Exception as e:
                 logger.error(f"Warning callback failed: {e}")
 
-    def stop(self):
+    def stop(self) -> None:
         """Stop WebSocket monitoring"""
         self.running = False
         logger.info("Lead-Lag monitor stopped")
@@ -187,7 +187,7 @@ class LeadLagMonitor:
             "data_points": len(self.price_history),
         }
 
-    def start_in_thread(self):
+    def start_in_thread(self) -> None:
         """Start WebSocket in background thread"""
 
         def run_async():

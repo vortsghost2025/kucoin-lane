@@ -35,7 +35,7 @@ class DataFetchingAgent(BaseAgent):
         super().__init__("DataFetchingAgent", config)
         self.cache: Dict[str, Dict[str, Any]] = {}
         self.cache_timeout = config.get("cache_timeout", 300) if config else 300
-        self.defilamma_base_url = "https://api.llama.fi"
+        self.defillama_base_url = "https://api.llama.fi"
 
     def _is_cache_valid(self, cache_key: str) -> bool:
         if cache_key not in self.cache:

@@ -41,6 +41,42 @@ from .whale_watch import WhaleWatch
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_ACCOUNT_BALANCE = 10000.0
+DEFAULT_NOTIONAL_REJECTION_THRESHOLD = 10
+DEFAULT_NOTIONAL_PAUSE_DURATION_HOURS = 1.0
+COOLDOWN_HOURS = 4
+COOLDOWN_SECONDS = COOLDOWN_HOURS * 3600
+V4_ADX_THRESHOLD = 50
+V2_CONSECUTIVE_DOWNTREND_LIMIT = 2
+MIN_ACCOUNT_BALANCE_RECOMMENDATION = 500
+LEAD_LAG_DANGER_CONFIDENCE = 1.0
+LEAD_LAG_DANGER_MULTIPLIER = 0.0
+TRENDING_DOWN_CONFIDENCE = 0.9
+TRENDING_DOWN_MULTIPLIER = 0.0
+WHALE_BULLISH_CONFIDENCE_THRESHOLD = 0.6
+WHALE_BULLISH_SIGNAL_CONFIDENCE = 0.95
+WHALE_BULLISH_SIGNAL_MULTIPLIER = 1.0
+WHALE_BEARISH_CONFIDENCE = 0.8
+WHALE_BEARISH_MULTIPLIER = 0.0
+REDUCE_SIZE_CONFIDENCE = 0.5
+REDUCE_SIZE_MULTIPLIER = 0.5
+RSI_APPROVED_CONFIDENCE = 0.7
+RSI_APPROVED_MULTIPLIER = 1.0
+NO_SIGNAL_CONFIDENCE = 0.3
+NO_SIGNAL_MULTIPLIER = 0.8
+V1_SOFT_HALT_CONFIDENCE = 0.7
+V1_SOFT_HALT_MULTIPLIER = 0.25
+V2_PROBE_CONFIDENCE = 0.6
+V2_PROBE_MULTIPLIER = 0.5
+V3_PROBE_CONFIDENCE = 0.6
+V3_PROBE_MULTIPLIER = 0.5
+V3_HALT_CONFIDENCE = 0.9
+V3_HALT_MULTIPLIER = 0.0
+V4_HALT_CONFIDENCE = 0.9
+V4_HALT_MULTIPLIER = 0.0
+V4_PROBE_CONFIDENCE = 0.6
+V4_PROBE_MULTIPLIER = 0.5
+
 
 class WorkflowStage(Enum):
     IDLE = "idle"
@@ -107,7 +143,7 @@ class IntelligenceOrchestrator(BaseAgent):
         self.is_paper_trading = config.get("paper_trading", True)
         self._last_daily_reset: Optional[str] = None
         self._cycle_count = 0
-        self._account_balance = config.get("account_balance", 10000.0)
+        self._account_balance = config.get("account_balance", DEFAULT_ACCOUNT_BALANCE)
         self._start_time = time.time()
         self.portfolio_cb = PortfolioCircuitBreaker(
             starting_equity=self._account_balance,
@@ -116,10 +152,10 @@ class IntelligenceOrchestrator(BaseAgent):
 
         self.consecutive_notional_rejections = 0
         self.notional_rejection_threshold = config.get(
-            "notional_rejection_threshold", 10
+            "notional_rejection_threshold", DEFAULT_NOTIONAL_REJECTION_THRESHOLD
         )
         self.notional_pause_duration_hours = config.get(
-            "notional_pause_duration_hours", 1.0
+            "notional_pause_duration_hours", DEFAULT_NOTIONAL_PAUSE_DURATION_HOURS
         )
 
         self.logger.setLevel(logging.DEBUG)
@@ -241,7 +277,7 @@ class IntelligenceOrchestrator(BaseAgent):
             pause_message = (
                 f"Detected {self.consecutive_notional_rejections} consecutive minimum notional rejections. "
                 f"Account balance (${account_balance:.2f}) is below effective trading threshold for {pair}. "
-                f"RECOMMENDATION: Increase account balance to $500+ or adjust risk parameters. "
+                f"RECOMMENDATION: Increase account balance to ${MIN_ACCOUNT_BALANCE_RECOMMENDATION}+ or adjust risk parameters. "
                 f"Pausing trading for {self.notional_pause_duration_hours} hour(s) to avoid unnecessary cycles."
             )
             self.logger.warning(f"[ADAPTIVE INTELLIGENCE] {pause_message}")
@@ -256,7 +292,7 @@ class IntelligenceOrchestrator(BaseAgent):
                     "trade_executed": False,
                     "reason": "notional_rejection_pause",
                     "intelligence": pause_message,
-                    "recommendation": "Increase account balance to $500+ or adjust risk parameters",
+                    "recommendation": f"Increase account balance to ${MIN_ACCOUNT_BALANCE_RECOMMENDATION}+ or adjust risk parameters",
                     "pause_duration_hours": self.notional_pause_duration_hours,
                 },
             )
@@ -425,8 +461,8 @@ class IntelligenceOrchestrator(BaseAgent):
         if results["lead_lag"] and results["lead_lag"]["signal"] == "DANGER":
             return (
                 "EXIT_ALL",
-                1.0,
-                0.0,
+                LEAD_LAG_DANGER_CONFIDENCE,
+                LEAD_LAG_DANGER_MULTIPLIER,
                 "LEAD-LAG DANGER: Binance cascade detected, exiting all positions",
             )
 
@@ -445,8 +481,8 @@ class IntelligenceOrchestrator(BaseAgent):
                 else:
                     return (
                         "HOLD",
-                        0.9,
-                        0.0,
+                        TRENDING_DOWN_CONFIDENCE,
+                        TRENDING_DOWN_MULTIPLIER,
                         f"TRENDING_DOWN detected (ADX: {regime['adx']:.1f}), no longs",
                     )
 
@@ -455,24 +491,24 @@ class IntelligenceOrchestrator(BaseAgent):
 
                 if (
                     whale["signal"] == "BULLISH_ABSORPTION"
-                    and whale["confidence"] > 0.6
+                    and whale["confidence"] > WHALE_BULLISH_CONFIDENCE_THRESHOLD
                 ):
                     return (
                         "BUY",
-                        0.95,
-                        1.0,
+                        WHALE_BULLISH_SIGNAL_CONFIDENCE,
+                        WHALE_BULLISH_SIGNAL_MULTIPLIER,
                         f"STRONG SIGNAL: Ranging market + Whale absorption "
                         f"(CVD: {whale['cvd_ratio']:.1%})",
                     )
 
                 elif whale["signal"] == "BEARISH_DISTRIBUTION":
-                    return ("SELL", 0.8, 0.0, "Whales distributing, exit positions")
+                    return ("SELL", WHALE_BEARISH_CONFIDENCE, WHALE_BEARISH_MULTIPLIER, "Whales distributing, exit positions")
 
             if regime["recommendation"] == "REDUCE_SIZE":
                 return (
                     "HOLD",
-                    0.5,
-                    0.5,
+                    REDUCE_SIZE_CONFIDENCE,
+                    REDUCE_SIZE_MULTIPLIER,
                     f"High volatility regime (ATR: {regime['atr_pct']:.2f}%), "
                     f"reduced position sizing",
                 )
@@ -480,23 +516,23 @@ class IntelligenceOrchestrator(BaseAgent):
             elif regime["recommendation"] == "USE_RSI":
                 return (
                     "HOLD",
-                    0.7,
-                    1.0,
+                    RSI_APPROVED_CONFIDENCE,
+                    RSI_APPROVED_MULTIPLIER,
                     f"Ranging market (ADX: {regime['adx']:.1f}), RSI strategy approved",
                 )
 
         return (
             "HOLD",
-            0.3,
-            0.8,
+            NO_SIGNAL_CONFIDENCE,
+            NO_SIGNAL_MULTIPLIER,
             "No strong intelligence signal, proceeding with caution",
         )
 
     def _handle_v1_soft_halt(self, regime: Dict) -> tuple:
         return (
             "HOLD",
-            0.7,
-            0.25,
+            V1_SOFT_HALT_CONFIDENCE,
+            V1_SOFT_HALT_MULTIPLIER,
             f"V1_SOFT_HALT: Downtrend detected (ADX: {regime['adx']:.1f}), "
             f"reduced to 25% position size for probe trades",
         )
@@ -509,19 +545,19 @@ class IntelligenceOrchestrator(BaseAgent):
             self.consecutive_downtrend_count.get(symbol, 0) + 1
         )
 
-        if self.consecutive_downtrend_count[symbol] >= 2:
+        if self.consecutive_downtrend_count[symbol] >= V2_CONSECUTIVE_DOWNTREND_LIMIT:
             return (
                 "HOLD",
-                0.9,
-                0.0,
+                TRENDING_DOWN_CONFIDENCE,
+                TRENDING_DOWN_MULTIPLIER,
                 f"V2_TWO_CANDLE: {self.consecutive_downtrend_count[symbol]} consecutive "
                 f"TRENDING_DOWN signals (ADX: {regime['adx']:.1f}), halting",
             )
         else:
             return (
                 "HOLD",
-                0.6,
-                0.5,
+                V2_PROBE_CONFIDENCE,
+                V2_PROBE_MULTIPLIER,
                 f"V2_TWO_CANDLE: 1st downtrend signal ({self.consecutive_downtrend_count[symbol]}/2), "
                 f"probing with 50% position size",
             )
@@ -532,23 +568,21 @@ class IntelligenceOrchestrator(BaseAgent):
 
         current_time = time.time()
         last_low_time = self.cooldown_override_active.get(symbol, current_time)
-        cooldown_hours = 4
-        cooldown_seconds = cooldown_hours * 3600
 
-        if current_time - last_low_time > cooldown_seconds:
+        if current_time - last_low_time > COOLDOWN_SECONDS:
             return (
                 "HOLD",
-                0.6,
-                0.5,
-                f"V3_COOLDOWN: {cooldown_hours}h since last low, probing with 50% position size "
+                V3_PROBE_CONFIDENCE,
+                V3_PROBE_MULTIPLIER,
+                f"V3_COOLDOWN: {COOLDOWN_HOURS}h since last low, probing with 50% position size "
                 f"(ADX: {regime['adx']:.1f})",
             )
         else:
-            hours_left = (cooldown_seconds - (current_time - last_low_time)) / 3600
+            hours_left = (COOLDOWN_SECONDS - (current_time - last_low_time)) / 3600
             return (
                 "HOLD",
-                0.9,
-                0.0,
+                V3_HALT_CONFIDENCE,
+                V3_HALT_MULTIPLIER,
                 f"V3_COOLDOWN: Cooldown active ({hours_left:.1f}h remaining), "
                 f"no trades until recovery confirmed (ADX: {regime['adx']:.1f})",
             )
@@ -556,19 +590,19 @@ class IntelligenceOrchestrator(BaseAgent):
     def _handle_v4_threshold(self, regime: Dict, symbol: str) -> tuple:
         adx = regime.get("adx", 0)
 
-        if adx > 50:
+        if adx > V4_ADX_THRESHOLD:
             return (
                 "HOLD",
-                0.9,
-                0.0,
-                f"V4_THRESHOLD: Strong downtrend (ADX: {adx:.1f} > 50), halting",
+                V4_HALT_CONFIDENCE,
+                V4_HALT_MULTIPLIER,
+                f"V4_THRESHOLD: Strong downtrend (ADX: {adx:.1f} > {V4_ADX_THRESHOLD}), halting",
             )
         else:
             return (
                 "HOLD",
-                0.6,
-                0.5,
-                f"V4_THRESHOLD: Mild downtrend (ADX: {adx:.1f} < 50), "
+                V4_PROBE_CONFIDENCE,
+                V4_PROBE_MULTIPLIER,
+                f"V4_THRESHOLD: Mild downtrend (ADX: {adx:.1f} < {V4_ADX_THRESHOLD}), "
                 f"probing with 50% position size",
             )
 
@@ -916,28 +950,19 @@ class IntelligenceOrchestrator(BaseAgent):
 
             self._write_cycle_artifacts(cycle_results, audit_data, cycle_start)
 
-    def _write_cycle_artifacts(
-        self,
-        cycle_results: Dict[str, Any],
-        audit_data: Dict[str, Any],
-        cycle_start: float,
-    ) -> None:
-        ts = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%S")
-        iso_ts = datetime.utcnow().isoformat()
-        result = cycle_results.get("final_result", {})
+    def _build_cycle_report(
+        self, result: Dict[str, Any], stage_val: str, audit_data: Dict[str, Any], iso_ts: str,
+    ) -> str:
         success = result.get("success", False) if isinstance(result, dict) else False
-        stage_val = self.current_stage.value
         audit_passed = audit_data.get("audit_passed", True) if audit_data else True
         violations = audit_data.get("violations", []) if audit_data else []
-        cb_active = self.circuit_breaker_active
-
-        cycle_md = (
+        return (
             f"# Cycle Report - {iso_ts}\n"
             f"- workflow: orchestrate_trading_workflow\n"
             f"- success: {success}\n"
             f"- stage: {stage_val}\n"
             f"- trading_paused: {self.trading_paused}\n"
-            f"- circuit_breaker_active: {cb_active}\n"
+            f"- circuit_breaker_active: {self.circuit_breaker_active}\n"
             f"- pause_reason: {self.pause_reason}\n"
             f"- audit_passed: {audit_passed}\n"
             f"- violations: {len(violations)}\n"
@@ -945,19 +970,23 @@ class IntelligenceOrchestrator(BaseAgent):
             f"- next_task: wait_for_next_cycle\n"
         )
 
+    def _write_cycle_report(self, cycle_md: str, ts: str) -> None:
         cycle_path = f"agent-logs/cycle-{ts}.md"
         try:
             with open(cycle_path, "w") as f:
                 f.write(cycle_md)
         except Exception:
-            pass
+            logger.warning("Failed to write cycle report to %s", cycle_path)
 
+    def _write_audit_trail(self, audit_data: Dict[str, Any], stage_val: str, iso_ts: str) -> None:
+        violations = audit_data.get("violations", []) if audit_data else []
+        audit_passed = audit_data.get("audit_passed", True) if audit_data else True
         trail_entry = {
             "timestamp": iso_ts,
             "audit_passed": audit_passed,
             "violation_count": len(violations),
             "violations": violations,
-            "circuit_breaker_active": cb_active,
+            "circuit_breaker_active": self.circuit_breaker_active,
             "stage": stage_val,
         }
         trail_path = "agent-logs/audit-trail.jsonl"
@@ -965,8 +994,15 @@ class IntelligenceOrchestrator(BaseAgent):
             with open(trail_path, "a") as f:
                 f.write(json.dumps(trail_entry) + "\n")
         except Exception:
-            pass
+            logger.warning("Failed to append audit trail to %s", trail_path)
 
+    def _write_return_report(
+        self, result: Dict[str, Any], stage_val: str, audit_data: Dict[str, Any],
+        cycle_start: float, ts: str, iso_ts: str,
+    ) -> None:
+        success = result.get("success", False) if isinstance(result, dict) else False
+        violations = audit_data.get("violations", []) if audit_data else []
+        audit_passed = audit_data.get("audit_passed", True) if audit_data else True
         duration = time.time() - cycle_start
         report = {
             "timestamp": iso_ts,
@@ -974,7 +1010,7 @@ class IntelligenceOrchestrator(BaseAgent):
             "success": success,
             "stage": stage_val,
             "trading_paused": self.trading_paused,
-            "circuit_breaker_active": cb_active,
+            "circuit_breaker_active": self.circuit_breaker_active,
             "pause_reason": self.pause_reason,
             "audit_passed": audit_passed,
             "violations": violations,
@@ -986,8 +1022,10 @@ class IntelligenceOrchestrator(BaseAgent):
             with open(report_path, "w") as f:
                 json.dump(report, f, indent=2)
         except Exception:
-            pass
+            logger.warning("Failed to write return report to %s", report_path)
 
+    def _write_heartbeat_and_session(self, result: Dict[str, Any], iso_ts: str) -> None:
+        success = result.get("success", False) if isinstance(result, dict) else False
         self._cycle_count += 1
         uptime = time.time() - self._start_time
         pid = os.getpid()
@@ -1010,7 +1048,7 @@ class IntelligenceOrchestrator(BaseAgent):
             ) as f:
                 json.dump(heartbeat, f)
         except Exception:
-            pass
+            logger.warning("Failed to write heartbeat file")
 
         session_state = {
             "lane": "kucoin-lane",
@@ -1026,14 +1064,31 @@ class IntelligenceOrchestrator(BaseAgent):
             "pid": pid,
             "uptime_seconds": round(uptime, 2),
         }
-        if cb_active or not success:
+        if self.circuit_breaker_active or not success:
             session_state["error"] = self.pause_reason or "cycle_error"
         try:
             Path("lanes/kucoin/inbox").mkdir(parents=True, exist_ok=True)
             with open("lanes/kucoin/inbox/SESSION_STATE.json", "w") as f:
                 json.dump(session_state, f)
         except Exception:
-            pass
+            logger.warning("Failed to write SESSION_STATE.json")
+
+    def _write_cycle_artifacts(
+        self,
+        cycle_results: Dict[str, Any],
+        audit_data: Dict[str, Any],
+        cycle_start: float,
+    ) -> None:
+        ts = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%S")
+        iso_ts = datetime.utcnow().isoformat()
+        result = cycle_results.get("final_result", {})
+        stage_val = self.current_stage.value
+
+        cycle_md = self._build_cycle_report(result, stage_val, audit_data, iso_ts)
+        self._write_cycle_report(cycle_md, ts)
+        self._write_audit_trail(audit_data, stage_val, iso_ts)
+        self._write_return_report(result, stage_val, audit_data, cycle_start, ts, iso_ts)
+        self._write_heartbeat_and_session(result, iso_ts)
 
     def get_system_status(self) -> Dict[str, Any]:
         agent_statuses = [

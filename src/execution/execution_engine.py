@@ -39,21 +39,48 @@ from ..config import (
 )
 from .exchange_adapter import ExchangeAdapter, KuCoinAdapter
 from ..risk.circuit_breaker import CircuitBreaker
-from ..risk.portfolio_circuit_breaker import PortfolioCircuitBreaker
+from ..risk.portfolio_circuit_breaker import PortfolioCircuitBreaker, CircuitBreakTriggered
 
 logger = logging.getLogger(__name__)
 
 LANE_NAME = "kucoin-lane"
 SESSION_STATE_REL_PATH = os.path.join("lanes", "kucoin", "inbox", "SESSION_STATE.json")
 
-PHASE_MAP = {
+PHASE_MAP: Dict[str, str] = {
     "initializing": "booting",
     "running": "active",
-    "error": "fault",
     "sleeping": "standby",
+    "error": "fault",
     "shutdown": "terminating",
+    "startup": "booting",
+    "pre_cycle": "active",
+    "post_cycle": "active",
     "final": "terminating",
 }
+
+
+def send_telegram_notification(message: str) -> bool:
+    try:
+        import requests
+
+        token = os.getenv("TELEGRAM_BOT_TOKEN")
+        chat_id = os.getenv("TELEGRAM_CHAT_ID")
+        if not token or not chat_id:
+            return False
+        url = f"https://api.telegram.org/bot{token}/sendMessage"
+        payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
+        response = requests.post(url, json=payload, timeout=10)
+        return response.status_code == 200
+    except Exception as e:
+        logger.warning(f"Failed to send Telegram notification: {e}")
+        return False
+
+
+class TradeStatus(Enum):
+    OPEN = "open"
+    CLOSED = "closed"
+    PENDING = "pending"
+    CANCELLED = "cancelled"
 
 
 def send_telegram_notification(message: str) -> bool:
@@ -97,7 +124,7 @@ PHASE_MAP: Dict[str, str] = {
 class ExecutionEngine(ABC):
     """Base class for execution engines with heartbeat and continuous loop."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         mode_suffix = "dry_run" if "DryRun" in self.__class__.__name__ else "live"
         self.heartbeat_file = f"bot_heartbeat_{mode_suffix}.json"
@@ -119,7 +146,7 @@ class ExecutionEngine(ABC):
             f"ExecutionEngine initialized - using heartbeat: {self.heartbeat_file}"
         )
 
-    def _resolve_session_state_contract(self):
+    def _resolve_session_state_contract(self) -> tuple:
         default_lane = "kucoin-lane"
         default_path = Path("lanes/kucoin/inbox/SESSION_STATE.json")
         contract_file = (
@@ -185,7 +212,7 @@ class ExecutionEngine(ABC):
 
     def write_heartbeat(
         self, status: str = "running", step: str = "main_loop", final: bool = False
-    ):
+    ) -> None:
         try:
             heartbeat = {
                 "timestamp": datetime.now().isoformat(),
@@ -207,31 +234,7 @@ class ExecutionEngine(ABC):
         except Exception as e:
             logger.warning(f"Failed to write heartbeat: {e}")
 
-    def write_session_state(self, status: str, final: bool = False):
-        self._last_runtime_status = status
-        phase = PHASE_MAP.get(status, "unknown")
-        payload = {
-            "lane": LANE_NAME,
-            "cycle": self.cycle_count,
-            "timestamp": datetime.now().isoformat(),
-            "mode": self.__class__.__name__,
-            "executor_class": self.__class__.__name__,
-            "status": status,
-            "runtime_status": status,
-            "phase": phase,
-            "final": final,
-            "step": "session_state",
-            "pid": os.getpid(),
-            "uptime_seconds": (datetime.now() - self.start_time).total_seconds(),
-        }
-        try:
-            os.makedirs(os.path.dirname(SESSION_STATE_REL_PATH), exist_ok=True)
-            with open(SESSION_STATE_REL_PATH, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2)
-        except Exception as e:
-            logger.warning(f"Failed to write SESSION_STATE: {e}")
-
-    def log(self, level: str, msg: str):
+    def log(self, level: str, msg: str) -> None:
         getattr(logger, level.lower())(f"[{self.__class__.__name__}] {msg}")
 
     @abstractmethod
@@ -289,7 +292,7 @@ class ExecutionEngine(ABC):
         finally:
             self.shutdown()
 
-    def shutdown(self):
+    def shutdown(self) -> None:
         self.log("info", "Shutting down execution engine")
         self.is_running = False
         self.write_heartbeat("shutdown", "final")
@@ -435,7 +438,7 @@ class DryRunExecutor(ExecutionEngine):
     - Pure backtesting engine
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
         self.log("info", "DRY_RUN mode: Backtesting only")
         self.paper_trading = True
@@ -443,7 +446,7 @@ class DryRunExecutor(ExecutionEngine):
         self.max_trades_per_session = config.get("max_trades_per_session", 2)
         self.load_backtest_data()
 
-    def load_backtest_data(self):
+    def load_backtest_data(self) -> None:
         self.log("info", "Loading backtest data from CSV files...")
         self.backtest_data = {}
 
@@ -544,7 +547,7 @@ class LiveExecutor(ExecutionEngine):
     - Extensive risk checks and safety mechanisms
     """
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any]) -> None:
         super().__init__(config)
         self.log("info", "LIVE_TRADING mode: Production trading enabled")
         self.paper_trading = False
@@ -559,10 +562,9 @@ class LiveExecutor(ExecutionEngine):
         self.order_type = config.get("order_type", "market")
         self.adapter: Optional[ExchangeAdapter] = None
         self.circuit_breaker = CircuitBreaker()
-        self.portfolio_circuit_breaker = PortfolioCircuitBreaker()
         self._initialize_adapter()
 
-    def _initialize_adapter(self):
+    def _initialize_adapter(self) -> None:
         try:
             self.adapter = KuCoinAdapter(
                 api_key=KUCOIN_API_KEY,
@@ -628,7 +630,7 @@ class LiveExecutor(ExecutionEngine):
             return f"Max open positions reached ({self.max_open_positions})"
         return None
 
-    def _risk_check(self):
+    def _risk_check(self) -> None:
         if not self.adapter:
             raise RuntimeError("Adapter not initialized")
         try:
@@ -661,8 +663,8 @@ class LiveExecutor(ExecutionEngine):
                 },
             }
         if (
-            getattr(self, "portfolio_circuit_breaker", None)
-            and self.portfolio_circuit_breaker.is_triggered()
+            getattr(self, "portfolio_cb", None)
+            and self.portfolio_cb.tripped
         ):
             return {
                 "agent": "LiveExecutor",
@@ -861,7 +863,7 @@ class LiveExecutor(ExecutionEngine):
             },
         }
 
-    def _check_existing_positions_at_startup(self):
+    def _check_existing_positions_at_startup(self) -> None:
         if not self.adapter:
             return
         try:

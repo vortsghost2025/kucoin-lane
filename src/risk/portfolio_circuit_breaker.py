@@ -4,10 +4,13 @@ Persist minimal state to survive restarts and enforce cooldown after a trip.
 """
 
 import json
+import logging
 import os
 import time
 import datetime as dt
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 
 class CircuitBreakTriggered(Exception):
@@ -28,14 +31,12 @@ class PortfolioCircuitBreaker:
         self.max_daily_loss_pct = max_daily_loss_pct
         self.cooldown_minutes = cooldown_minutes
         self.state_path = state_path
-
         self.session_start_equity: float = self.starting_equity
         self.equity_peak: float = self.starting_equity
         self.last_equity: float = self.starting_equity
         self.tripped: bool = False
         self.trip_reason: str = ""
         self.trip_time: Optional[float] = None
-
         self._load_state()
 
     def _load_state(self) -> None:
@@ -47,6 +48,7 @@ class PortfolioCircuitBreaker:
             with open(self.state_path, "r") as f:
                 state = json.load(f)
         except Exception:
+            logger.warning("Failed to load state from %s", self.state_path)
             self._persist(today)
             return
         if state.get("date") != today:
@@ -76,7 +78,7 @@ class PortfolioCircuitBreaker:
             with open(self.state_path, "w") as f:
                 json.dump(state, f, indent=2)
         except Exception:
-            pass
+            logger.warning("Failed to persist state to %s", self.state_path)
 
     def check(self, current_equity: float) -> None:
         if self.tripped:

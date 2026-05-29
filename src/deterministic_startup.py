@@ -66,10 +66,10 @@ class DeterministicStartup:
                         os.remove(lock_file)
                         self.log(f"Deleted stale lock: {lock_file}")
                         cleaned_count += 1
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as e:
+                        self.log(f"WARN: Could not delete lock {lock_file}: {e}")
+        except Exception as e:
+            self.log(f"WARN: Could not clean position_locks: {e}")
 
         try:
             if os.path.exists("state_backups"):
@@ -81,10 +81,10 @@ class DeterministicStartup:
                         os.remove(old_backup)
                         self.log(f"Deleted old backup: {old_backup}")
                         cleaned_count += 1
-                    except Exception:
-                        pass
-        except Exception:
-            pass
+                    except Exception as e:
+                        self.log(f"WARN: Could not delete backup {old_backup}: {e}")
+        except Exception as e:
+            self.log(f"WARN: Could not clean state_backups: {e}")
 
         self.log(f"Cleanup complete: {cleaned_count} files removed")
         self.startup_path.append("cleanup_complete")
