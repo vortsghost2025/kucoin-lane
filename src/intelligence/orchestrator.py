@@ -31,6 +31,7 @@ import pandas as pd
 
 from ..base_agent import BaseAgent, AgentStatus
 from ..config import REGIME_GUARD_MODE
+from ..risk.circuit_breaker import CircuitBreaker
 from ..risk.portfolio_circuit_breaker import (
     PortfolioCircuitBreaker,
     CircuitBreakTriggered,
@@ -149,6 +150,18 @@ class IntelligenceOrchestrator(BaseAgent):
             starting_equity=self._account_balance,
             state_path=os.getenv("PORTFOLIO_CB_STATE_PATH", "portfolio_cb_state.json"),
         )
+
+        try:
+            cb_config = config.get("circuit_breaker", {})
+            self.circuit_breaker = CircuitBreaker(
+                loss_threshold_pct=cb_config.get("loss_threshold_pct", 8.0),
+                time_window_minutes=cb_config.get("time_window_minutes", 60),
+                check_interval_seconds=cb_config.get("check_interval_seconds", 300),
+                name="OrchestratorCB",
+            )
+        except Exception as e:
+            self.logger.warning(f"CircuitBreaker init failed, using no-op fallback: {e}")
+            self.circuit_breaker = None
 
         self.consecutive_notional_rejections = 0
         self.notional_rejection_threshold = config.get(
@@ -855,6 +868,18 @@ class IntelligenceOrchestrator(BaseAgent):
 
             self.consecutive_notional_rejections = 0
 
+            if self.circuit_breaker is not None and self.circuit_breaker.is_triggered():
+                self.logger.warning("[CIRCUIT BREAKER] Orchestrator circuit breaker is tripped - skipping trade")
+                cycle_results["final_result"] = self.create_message(
+                    action="orchestrate_workflow",
+                    success=True,
+                    data={
+                        "trade_executed": False,
+                        "reason": "Orchestrator circuit breaker tripped",
+                    },
+                )
+                return cycle_results["final_result"]
+
             self.transition_stage(WorkflowStage.EXECUTING)
             exec_result = self._execute_agent_phase(
                 "ExecutionAgent",
@@ -883,6 +908,18 @@ class IntelligenceOrchestrator(BaseAgent):
                 return cycle_results["final_result"]
 
             self._update_account_balance_if_provided(exec_result)
+
+            if self.circuit_breaker is not None:
+                try:
+                    trade_pnl = 0.0
+                    exec_data = exec_result.get("data", {}) if isinstance(exec_result, dict) else {}
+                    if isinstance(exec_data, dict):
+                        trade_pnl = float(exec_data.get("pnl", 0.0))
+                    ok, reason = self.circuit_breaker.check_circuit(trade_pnl)
+                    if not ok:
+                        self.logger.warning(f"[CIRCUIT BREAKER] Check failed after trade: {reason}")
+                except Exception as e:
+                    self.logger.warning(f"CircuitBreaker check_circuit error (non-fatal): {e}")
 
             cycle_results["final_result"] = self.create_message(
                 action="orchestrate_workflow",

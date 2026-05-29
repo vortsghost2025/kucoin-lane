@@ -356,6 +356,7 @@ class RiskManagementAgent(BaseAgent):
                 }
             position_size = min_size_units
         else:
+            actual_risk_amount = 0
             if self.kelly_sizer is not None and len(self.trade_history) >= self.kelly_sizer.min_trades_for_kelly:
                 try:
                     kelly_pct = self.kelly_sizer.calculate_kelly_pct(self.trade_history)
@@ -365,6 +366,7 @@ class RiskManagementAgent(BaseAgent):
                         kelly_pct=kelly_pct,
                     )
                     position_size = position_size * signal_strength
+                    actual_risk_amount = position_size * risk_per_unit
                 except Exception as kelly_err:
                     self.logger.warning(f"Kelly sizing failed, falling back to fixed: {kelly_err}")
                     confidence_multiplier = signal_strength * backtest_win_rate
