@@ -74,10 +74,10 @@ class KuCoinAdapter(ExchangeAdapter):
                 "kucoin-python not installed. Run: pip install python-kucoin"
             )
 
-        use_sandbox = os.getenv("KUCOIN_USE_SANDBOX", "true").lower() == "true"
+        self.sandbox = os.getenv("KUCOIN_USE_SANDBOX", "true").lower() == "true"
         base_url = (
             "https://openapi-sandbox.kucoin.com"
-            if use_sandbox
+            if self.sandbox
             else "https://openapi-v2.kucoin.com"
         )
 
@@ -88,12 +88,29 @@ class KuCoinAdapter(ExchangeAdapter):
             api_secret=api_secret,
         )
         self.passphrase = passphrase
-        self.kucoin_client = KuCoinClient(
-            key=api_key,
-            secret=api_secret,
-            passphrase=passphrase,
-            sandbox=use_sandbox,
-        )
+        try:
+            self.kucoin_client = KuCoinClient(
+                api_key=api_key,
+                api_secret=api_secret,
+                passphrase=passphrase,
+                sandbox=self.sandbox,
+            )
+        except Exception as sandbox_err:
+            if self.sandbox:
+                import logging
+                logging.getLogger(__name__).warning(
+                    f"KuCoin sandbox mode deprecated in SDK v2.2.0, falling back to production: {sandbox_err}"
+                )
+                self.sandbox = False
+                self.base_url = "https://openapi-v2.kucoin.com"
+                self.kucoin_client = KuCoinClient(
+                    api_key=api_key,
+                    api_secret=api_secret,
+                    passphrase=passphrase,
+                    sandbox=False,
+                )
+            else:
+                raise
         self._test_connection()
 
     def _test_connection(self) -> None:
