@@ -9,6 +9,13 @@ from typing import Any, Dict, Optional
 from datetime import datetime
 
 from ..base_agent import BaseAgent, AgentStatus
+from ..config import BACKTEST_CONFIG as GLOBAL_BACKTEST_CONFIG
+
+
+DEFAULT_ASSET_FACTOR = {
+    "win_rate_multiplier": 1.0,
+    "max_drawdown_adjustment": 1.0,
+}
 
 
 class BacktestingAgent(BaseAgent):
@@ -25,26 +32,33 @@ class BacktestingAgent(BaseAgent):
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__("BacktestingAgent", config)
+        cfg = config or {}
         self.min_backtest_win_rate = (
-            config.get("min_win_rate", 0.45) if config else 0.45
+            cfg.get("min_win_rate", 0.45)
         )
-        self.max_drawdown_allowed = config.get("max_drawdown", 0.15) if config else 0.15
+        self.max_drawdown_allowed = cfg.get("max_drawdown", 0.15)
         self.historical_data: Dict[str, Any] = {}
 
-        self.asset_performance_factors = {
-            "SOL/USDT": {
-                "win_rate_multiplier": 1.0,
-                "max_drawdown_adjustment": 1.0,
-            },
-            "BTC/USDT": {
-                "win_rate_multiplier": 0.87,
-                "max_drawdown_adjustment": 1.15,
-            },
-            "ETH/USDT": {
-                "win_rate_multiplier": 0.90,
-                "max_drawdown_adjustment": 1.10,
-            },
+        global_default = GLOBAL_BACKTEST_CONFIG.get("asset_factor_default", {})
+        config_default = cfg.get("asset_factor_default", {})
+        if not isinstance(global_default, dict):
+            global_default = {}
+        if not isinstance(config_default, dict):
+            config_default = {}
+        self.asset_factor_default = {
+            **DEFAULT_ASSET_FACTOR,
+            **global_default,
+            **config_default,
         }
+
+        global_factors = GLOBAL_BACKTEST_CONFIG.get("asset_performance_factors", {})
+        config_factors = cfg.get("asset_performance_factors", global_factors)
+        if isinstance(config_factors, dict):
+            self.asset_performance_factors = {
+                pair: value for pair, value in config_factors.items() if isinstance(value, dict)
+            }
+        else:
+            self.asset_performance_factors = {}
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         self.log_execution_start("backtest_signals")
@@ -103,9 +117,10 @@ class BacktestingAgent(BaseAgent):
         signal_type = analysis.get("recommendation", "HOLD")
         signal_strength = analysis.get("signal_strength", 0)
 
-        asset_factor = self.asset_performance_factors.get(
-            pair, self.asset_performance_factors.get("SOL/USDT")
-        )
+        asset_factor = {
+            **self.asset_factor_default,
+            **self.asset_performance_factors.get(pair, {}),
+        }
         win_rate_multiplier = asset_factor["win_rate_multiplier"]
         drawdown_adjustment = asset_factor["max_drawdown_adjustment"]
 
@@ -147,37 +162,39 @@ class BacktestingAgent(BaseAgent):
         }
 
     def _calculate_buy_signal_win_rate(
-        self, signal_strength: float, pair: str = "SOL/USDT"
+        self, signal_strength: float, pair: str = ""
     ) -> float:
         base_rate = 0.52
         strength_boost = signal_strength * 0.15
         win_rate = base_rate + strength_boost
         win_rate = min(win_rate, 0.75)
 
-        asset_factor = self.asset_performance_factors.get(
-            pair, self.asset_performance_factors.get("SOL/USDT")
-        )
+        asset_factor = {
+            **self.asset_factor_default,
+            **self.asset_performance_factors.get(pair, {}),
+        }
         adjusted_win_rate = win_rate * asset_factor["win_rate_multiplier"]
 
         return adjusted_win_rate
 
     def _calculate_sell_signal_win_rate(
-        self, signal_strength: float, pair: str = "SOL/USDT"
+        self, signal_strength: float, pair: str = ""
     ) -> float:
         base_rate = 0.48
         strength_boost = signal_strength * 0.12
         win_rate = base_rate + strength_boost
         win_rate = min(win_rate, 0.65)
 
-        asset_factor = self.asset_performance_factors.get(
-            pair, self.asset_performance_factors.get("SOL/USDT")
-        )
+        asset_factor = {
+            **self.asset_factor_default,
+            **self.asset_performance_factors.get(pair, {}),
+        }
         adjusted_win_rate = win_rate * asset_factor["win_rate_multiplier"]
 
         return adjusted_win_rate
 
     def _estimate_max_drawdown(
-        self, signal_type: str, signal_strength: float, pair: str = "SOL/USDT"
+        self, signal_type: str, signal_strength: float, pair: str = ""
     ) -> float:
         if signal_type == "BUY":
             base_drawdown = 0.08
@@ -189,9 +206,10 @@ class BacktestingAgent(BaseAgent):
         adjusted_drawdown = base_drawdown * (1 - signal_strength * 0.3)
         adjusted_drawdown = max(adjusted_drawdown, 0.02)
 
-        asset_factor = self.asset_performance_factors.get(
-            pair, self.asset_performance_factors.get("SOL/USDT")
-        )
+        asset_factor = {
+            **self.asset_factor_default,
+            **self.asset_performance_factors.get(pair, {}),
+        }
         final_drawdown = adjusted_drawdown * asset_factor["max_drawdown_adjustment"]
 
         return final_drawdown

@@ -1,0 +1,74 @@
+{
+  "risk": {
+    "default": {
+      "min_signal_strength_adjustment": 0.0,
+      "stop_loss_adjustment": 1.0,
+      "position_size_multiplier": 1.0
+    },
+    "pairs": {
+      "SOL/USDT": {
+        "min_signal_strength_adjustment": 0.0,
+        "stop_loss_adjustment": 1.0,
+        "position_size_multiplier": 1.0
+      },
+      "BTC/USDT": {
+        "min_signal_strength_adjustment": 0.05,
+        "stop_loss_adjustment": 0.95,
+        "position_size_multiplier": 0.8
+      },
+      "ETH/USDT": {
+        "min_signal_strength_adjustment": 0.03,
+        "stop_loss_adjustment": 0.97,
+        "position_size_multiplier": 0.9
+      }
+    }
+  },
+  "market": {
+    "default": {
+      "rsi_weight": 0.8,
+      "momentum_weight": 1.0,
+      "volatility_adjustment": 0.1,
+      "signal_threshold_adj": 0
+    },
+    "pairs": {
+      "SOL/USDT": {
+        "rsi_weight": 0.8,
+        "momentum_weight": 1.0,
+        "volatility_adjustment": 0.1,
+        "signal_threshold_adj": 0
+      },
+      "BTC/USDT": {
+        "rsi_weight": 0.6,
+        "momentum_weight": 1.2,
+        "volatility_adjustment": 0.05,
+        "signal_threshold_adj": 5
+      },
+      "ETH/USDT": {
+        "rsi_weight": 0.7,
+        "momentum_weight": 1.1,
+        "volatility_adjustment": 0.07,
+        "signal_threshold_adj": 3
+      }
+    }
+  },
+  "backtest": {
+    "default": {
+      "win_rate_multiplier": 1.0,
+      "max_drawdown_adjustment": 1.0
+    },
+    "pairs": {
+      "SOL/USDT": {
+        "win_rate_multiplier": 1.0,
+        "max_drawdown_adjustment": 1.0
+      },
+      "BTC/USDT": {
+        "win_rate_multiplier": 0.87,
+        "max_drawdown_adjustment": 1.15
+      },
+      "ETH/USDT": {
+        "win_rate_multiplier": 0.9,
+        "max_drawdown_adjustment": 1.1
+      }
+    }
+  }
+}

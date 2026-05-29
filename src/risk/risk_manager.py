@@ -8,10 +8,16 @@ from typing import Any, Dict, Optional
 import logging
 
 from ..base_agent import BaseAgent, AgentStatus
+from ..config import RISK_CONFIG as GLOBAL_RISK_CONFIG
 from .kelly_criterion import KellyPositionSizer
 
 MAX_DAILY_LOSS_CAP = 0.02
 DEFAULT_MIN_POSITION_SIZE_UNITS = 0.001
+DEFAULT_ASSET_CONFIG = {
+    "min_signal_strength_adjustment": 0.0,
+    "stop_loss_adjustment": 1.0,
+    "position_size_multiplier": 1.0,
+}
 
 
 class RiskManagementAgent(BaseAgent):
@@ -31,48 +37,67 @@ class RiskManagementAgent(BaseAgent):
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__("RiskManagementAgent", config)
+        cfg = config or {}
 
-        self.account_balance = config.get("account_balance", 10000) if config else 10000
-        self.risk_per_trade = config.get("risk_per_trade", 0.01) if config else 0.01
+        self.account_balance = cfg.get("account_balance", 10000)
+        self.risk_per_trade = cfg.get("risk_per_trade", 0.01)
         self.min_risk_reward_ratio = (
-            config.get("min_risk_reward_ratio", 1.5) if config else 1.5
+            cfg.get("min_risk_reward_ratio", 1.5)
         )
 
         requested_max_daily_loss = (
-            config.get("max_daily_loss", 0.05) if config else 0.05
+            cfg.get("max_daily_loss", 0.05)
         )
         self.max_daily_loss = min(requested_max_daily_loss, MAX_DAILY_LOSS_CAP)
 
         self.default_stop_loss_pct = (
-            config.get("default_stop_loss_pct", 0.02) if config else 0.02
+            cfg.get("default_stop_loss_pct", 0.02)
         )
         self.min_signal_strength = (
-            config.get("min_signal_strength", 0.3) if config else 0.3
+            cfg.get("min_signal_strength", 0.3)
         )
-        self.min_win_rate = config.get("min_win_rate", 0.45) if config else 0.45
-        self.min_notional_usd = config.get("min_notional_usd", 10.0) if config else 10.0
+        self.min_win_rate = cfg.get("min_win_rate", 0.45)
+        self.min_notional_usd = cfg.get("min_notional_usd", 10.0)
 
-        if config:
-            configured_min_size = config.get("min_position_size_units")
-            self.min_position_size_units = (
-                configured_min_size
-                if configured_min_size is not None
-                else DEFAULT_MIN_POSITION_SIZE_UNITS
-            )
-        else:
-            self.min_position_size_units = DEFAULT_MIN_POSITION_SIZE_UNITS
-
-        self.min_position_size_by_pair = (
-            config.get("min_position_size_by_pair", {}) if config else {}
+        configured_min_size = cfg.get("min_position_size_units")
+        self.min_position_size_units = (
+            configured_min_size
+            if configured_min_size is not None
+            else DEFAULT_MIN_POSITION_SIZE_UNITS
         )
-        self.enforce_min_position_size_only = (
-            config.get("enforce_min_position_size_only", True) if config else True
+
+        self.min_position_size_by_pair = cfg.get("min_position_size_by_pair", {})
+        self.enforce_min_position_size_only = cfg.get(
+            "enforce_min_position_size_only", True
         )
 
         self.cumulative_risk_today = 0.0
 
+        global_asset_default = GLOBAL_RISK_CONFIG.get("asset_config_default", {})
+        config_asset_default = cfg.get("asset_config_default", {})
+        if not isinstance(global_asset_default, dict):
+            global_asset_default = {}
+        if not isinstance(config_asset_default, dict):
+            config_asset_default = {}
+        self.asset_config_default = {
+            **DEFAULT_ASSET_CONFIG,
+            **global_asset_default,
+            **config_asset_default,
+        }
+
+        global_asset_configs = GLOBAL_RISK_CONFIG.get("asset_configs", {})
+        config_asset_configs = cfg.get("asset_configs", global_asset_configs)
+        if isinstance(config_asset_configs, dict):
+            self.asset_configs = {
+                pair: value
+                for pair, value in config_asset_configs.items()
+                if isinstance(value, dict)
+            }
+        else:
+            self.asset_configs = {}
+
         try:
-            kelly_config = config.get("kelly", {}) if config else {}
+            kelly_config = cfg.get("kelly", {})
             self.kelly_sizer = KellyPositionSizer(
                 min_position_pct=kelly_config.get("min_position_pct", 0.01),
                 max_position_pct=kelly_config.get("max_position_pct", 0.25),
@@ -84,24 +109,6 @@ class RiskManagementAgent(BaseAgent):
             self.kelly_sizer = None
 
         self.trade_history: list = []
-
-        self.asset_configs = {
-            "SOL/USDT": {
-                "min_signal_strength_adjustment": 0.0,
-                "stop_loss_adjustment": 1.0,
-                "position_size_multiplier": 1.0,
-            },
-            "BTC/USDT": {
-                "min_signal_strength_adjustment": 0.05,
-                "stop_loss_adjustment": 0.95,
-                "position_size_multiplier": 0.80,
-            },
-            "ETH/USDT": {
-                "min_signal_strength_adjustment": 0.03,
-                "stop_loss_adjustment": 0.97,
-                "position_size_multiplier": 0.90,
-            },
-        }
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         self.log_execution_start("assess_and_size_position")
@@ -310,7 +317,10 @@ class RiskManagementAgent(BaseAgent):
             else "unknown"
         )
 
-        asset_config = self.asset_configs.get(pair, self.asset_configs.get("SOL/USDT"))
+        asset_config = {
+            **self.asset_config_default,
+            **self.asset_configs.get(pair, {}),
+        }
         stop_loss_adjustment = asset_config["stop_loss_adjustment"]
         position_size_multiplier = asset_config["position_size_multiplier"]
         min_signal_strength_adjustment = asset_config["min_signal_strength_adjustment"]

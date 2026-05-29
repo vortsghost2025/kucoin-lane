@@ -10,6 +10,7 @@ from typing import Any, Dict, Optional
 from enum import Enum
 
 from ..base_agent import BaseAgent, AgentStatus
+from ..config import MARKET_CONFIG as GLOBAL_MARKET_CONFIG
 from ..entry_timing import EntryTimingValidator
 
 
@@ -19,6 +20,14 @@ class MarketRegime(Enum):
     SIDEWAYS = "sideways"
     HIGH_VOLATILITY = "high_volatility"
     UNKNOWN = "unknown"
+
+
+DEFAULT_ASSET_CONFIG = {
+    "rsi_weight": 0.8,
+    "momentum_weight": 1.0,
+    "volatility_adjustment": 0.1,
+    "signal_threshold_adj": 0,
+}
 
 
 class MarketAnalysisAgent(BaseAgent):
@@ -36,40 +45,41 @@ class MarketAnalysisAgent(BaseAgent):
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__("MarketAnalysisAgent", config)
-        self.rsi_period = config.get("rsi_period", 14) if config else 14
-        self.macd_fast = config.get("macd_fast", 12) if config else 12
-        self.macd_slow = config.get("macd_slow", 26) if config else 26
-        self.macd_signal = config.get("macd_signal", 9) if config else 9
-        self.downtrend_threshold = (
-            config.get("downtrend_threshold", -5) if config else -5
-        )
+        cfg = config or {}
+        self.rsi_period = cfg.get("rsi_period", 14)
+        self.macd_fast = cfg.get("macd_fast", 12)
+        self.macd_slow = cfg.get("macd_slow", 26)
+        self.macd_signal = cfg.get("macd_signal", 9)
+        self.downtrend_threshold = cfg.get("downtrend_threshold", -5)
 
-        self.asset_configs = {
-            "SOL/USDT": {
-                "rsi_weight": 0.8,
-                "momentum_weight": 1.0,
-                "volatility_adjustment": 0.1,
-                "signal_threshold_adj": 0,
-            },
-            "BTC/USDT": {
-                "rsi_weight": 0.6,
-                "momentum_weight": 1.2,
-                "volatility_adjustment": 0.05,
-                "signal_threshold_adj": 5,
-            },
-            "ETH/USDT": {
-                "rsi_weight": 0.7,
-                "momentum_weight": 1.1,
-                "volatility_adjustment": 0.07,
-                "signal_threshold_adj": 3,
-            },
+        global_asset_default = GLOBAL_MARKET_CONFIG.get("asset_config_default", {})
+        config_asset_default = cfg.get("asset_config_default", {})
+        if not isinstance(global_asset_default, dict):
+            global_asset_default = {}
+        if not isinstance(config_asset_default, dict):
+            config_asset_default = {}
+        self.asset_config_default = {
+            **DEFAULT_ASSET_CONFIG,
+            **global_asset_default,
+            **config_asset_default,
         }
+
+        global_asset_configs = GLOBAL_MARKET_CONFIG.get("asset_configs", {})
+        config_asset_configs = cfg.get("asset_configs", global_asset_configs)
+        if isinstance(config_asset_configs, dict):
+            self.asset_configs = {
+                pair: value
+                for pair, value in config_asset_configs.items()
+                if isinstance(value, dict)
+            }
+        else:
+            self.asset_configs = {}
 
         self.entry_timing_enabled = False
         self.entry_timing_validator = None
 
-        if config:
-            entry_config = config.get("entry_timing_config", {})
+        if cfg:
+            entry_config = cfg.get("entry_timing_config", {})
             if entry_config.get("enabled", False):
                 threshold_pct = entry_config.get("reversal_threshold_pct", 0.001)
                 self.entry_timing_validator = EntryTimingValidator(threshold_pct)
@@ -83,7 +93,7 @@ class MarketAnalysisAgent(BaseAgent):
             self.logger.info("[ENTRY TIMING] Not configured")
 
         self.logger.info(
-            "[ASSET CONFIGS] Loaded asset-specific parameters (SOL/BTC/ETH)"
+            f"[ASSET CONFIGS] Loaded {len(self.asset_configs)} pair overrides"
         )
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -156,7 +166,7 @@ class MarketAnalysisAgent(BaseAgent):
         regime = self._classify_regime(price_change_24h, rsi, volatility)
         signal = self._generate_signal(price_change_24h, rsi, pair)
 
-        asset_config = self.asset_configs.get(pair, self.asset_configs.get("SOL/USDT"))
+        asset_config = {**self.asset_config_default, **self.asset_configs.get(pair, {})}
 
         buy_threshold = 65 + asset_config["signal_threshold_adj"]
         sell_threshold = 35 - asset_config["signal_threshold_adj"]
@@ -245,9 +255,9 @@ class MarketAnalysisAgent(BaseAgent):
         return MarketRegime.SIDEWAYS.value
 
     def _generate_signal(
-        self, price_change: float, rsi: float, pair: str = "SOL/USDT"
+        self, price_change: float, rsi: float, pair: str = ""
     ) -> float:
-        asset_config = self.asset_configs.get(pair, self.asset_configs.get("SOL/USDT"))
+        asset_config = {**self.asset_config_default, **self.asset_configs.get(pair, {})}
         rsi_weight = asset_config["rsi_weight"]
         momentum_weight = asset_config["momentum_weight"]
 

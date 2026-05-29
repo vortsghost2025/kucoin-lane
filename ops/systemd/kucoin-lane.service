@@ -1,0 +1,20 @@
+[Unit]
+Description=Kucoin Lane (Docker Compose dry-run/live runtime)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=we4free
+RemainAfterExit=yes
+WorkingDirectory=/home/we4free/agent/repos/kucoin-lane
+Environment=COMPOSE_PROJECT_NAME=kucoin-lane
+ExecStartPre=/usr/bin/docker info
+ExecStart=/usr/bin/docker compose up -d kucoin-lane
+ExecStop=/usr/bin/docker compose stop kucoin-lane
+ExecReload=/usr/bin/docker compose up -d --build kucoin-lane
+TimeoutStartSec=120
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
