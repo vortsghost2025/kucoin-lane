@@ -8,6 +8,7 @@ from typing import Any, Dict, Optional
 import logging
 
 from ..base_agent import BaseAgent, AgentStatus
+from .kelly_criterion import KellyPositionSizer
 
 MAX_DAILY_LOSS_CAP = 0.02
 DEFAULT_MIN_POSITION_SIZE_UNITS = 0.001
@@ -69,6 +70,20 @@ class RiskManagementAgent(BaseAgent):
         )
 
         self.cumulative_risk_today = 0.0
+
+        try:
+            kelly_config = config.get("kelly", {}) if config else {}
+            self.kelly_sizer = KellyPositionSizer(
+                min_position_pct=kelly_config.get("min_position_pct", 0.01),
+                max_position_pct=kelly_config.get("max_position_pct", 0.25),
+                min_trades_for_kelly=kelly_config.get("min_trades_for_kelly", 20),
+                default_position_pct=kelly_config.get("default_position_pct", self.risk_per_trade),
+            )
+        except Exception as e:
+            self.logger.warning(f"KellyPositionSizer init failed, falling back to fixed sizing: {e}")
+            self.kelly_sizer = None
+
+        self.trade_history: list = []
 
         self.asset_configs = {
             "SOL/USDT": {
@@ -341,8 +356,26 @@ class RiskManagementAgent(BaseAgent):
                 }
             position_size = min_size_units
         else:
-            confidence_multiplier = signal_strength * backtest_win_rate
-            actual_risk_amount = max_risk_amount * confidence_multiplier
+            if self.kelly_sizer is not None and len(self.trade_history) >= self.kelly_sizer.min_trades_for_kelly:
+                try:
+                    kelly_pct = self.kelly_sizer.calculate_kelly_pct(self.trade_history)
+                    position_size = self.kelly_sizer.calculate_position_size(
+                        account_balance=self.account_balance,
+                        entry_price=current_price,
+                        kelly_pct=kelly_pct,
+                    )
+                    position_size = position_size * signal_strength
+                except Exception as kelly_err:
+                    self.logger.warning(f"Kelly sizing failed, falling back to fixed: {kelly_err}")
+                    confidence_multiplier = signal_strength * backtest_win_rate
+                    actual_risk_amount = max_risk_amount * confidence_multiplier
+                    if risk_per_unit > 0:
+                        position_size = actual_risk_amount / risk_per_unit
+                    else:
+                        position_size = 0
+            else:
+                confidence_multiplier = signal_strength * backtest_win_rate
+                actual_risk_amount = max_risk_amount * confidence_multiplier
 
             if risk_per_unit > 0:
                 position_size = actual_risk_amount / risk_per_unit
@@ -354,6 +387,8 @@ class RiskManagementAgent(BaseAgent):
 
             if min_size_units > 0 and position_size < min_size_units:
                 position_size = min_size_units
+
+        actual_risk_amount = position_size * risk_per_unit
 
         position_size_usd = position_size * current_price
 
@@ -375,8 +410,6 @@ class RiskManagementAgent(BaseAgent):
                 "rejection_reason": "Position size exceeds account balance",
                 "risk_reward_ratio": 0,
             }
-
-        actual_risk_amount = position_size * risk_per_unit
 
         if (
             not self.enforce_min_position_size_only
@@ -501,3 +534,6 @@ class RiskManagementAgent(BaseAgent):
         self.logger.info(
             f"Account balance updated: {old_balance:.2f} -> {new_balance:.2f}"
         )
+
+    def record_trade_result(self, pnl_pct: float) -> None:
+        self.trade_history.append({"pnl_pct": pnl_pct})

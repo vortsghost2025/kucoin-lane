@@ -83,44 +83,6 @@ class TradeStatus(Enum):
     CANCELLED = "cancelled"
 
 
-def send_telegram_notification(message: str) -> bool:
-    try:
-        import requests
-
-        token = os.getenv("TELEGRAM_BOT_TOKEN")
-        chat_id = os.getenv("TELEGRAM_CHAT_ID")
-        if not token or not chat_id:
-            return False
-
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
-        response = requests.post(url, json=payload, timeout=10)
-        return response.status_code == 200
-    except Exception as e:
-        logger.warning(f"Failed to send Telegram notification: {e}")
-        return False
-
-
-class TradeStatus(Enum):
-    OPEN = "open"
-    CLOSED = "closed"
-    PENDING = "pending"
-    CANCELLED = "cancelled"
-
-
-PHASE_MAP: Dict[str, str] = {
-    "initializing": "booting",
-    "running": "active",
-    "sleeping": "standby",
-    "error": "fault",
-    "shutdown": "terminating",
-    "startup": "booting",
-    "pre_cycle": "active",
-    "post_cycle": "active",
-    "final": "terminating",
-}
-
-
 class ExecutionEngine(ABC):
     """Base class for execution engines with heartbeat and continuous loop."""
 
@@ -141,6 +103,7 @@ class ExecutionEngine(ABC):
         self.total_trades = 0
         self.winning_trades = 0
         self.losing_trades = 0
+        self.portfolio_cb = None
         self._last_runtime_status: str = "initializing"
         logger.info(
             f"ExecutionEngine initialized - using heartbeat: {self.heartbeat_file}"
@@ -266,10 +229,31 @@ class ExecutionEngine(ABC):
                 try:
                     self.cycle_count += 1
                     self.log("info", f"=== CYCLE {self.cycle_count} START ===")
+
+                    if self.portfolio_cb is not None and self.portfolio_cb.tripped:
+                        self.log("warning", "[PORTFOLIO CB] Portfolio circuit breaker tripped - halting cycle")
+                        self.write_heartbeat("error", "portfolio_cb_tripped")
+                        break
+
                     self.write_heartbeat("running", "pre_cycle")
                     self.write_session_state("running")
                     self.run_cycle()
                     self.log("info", f"=== CYCLE {self.cycle_count} COMPLETE ===")
+
+                    if self.portfolio_cb is not None:
+                        try:
+                            current_equity = float(self.config.get("account_balance", 0))
+                            if current_equity <= 0:
+                                total_pnl = self._get_total_pnl()
+                                current_equity = float(self.config.get("position_size_usd", 10000.0)) + total_pnl
+                            self.portfolio_cb.check(current_equity)
+                        except CircuitBreakTriggered as cb_err:
+                            self.log("warning", f"[PORTFOLIO CB] Tripped: {cb_err}")
+                            self.write_heartbeat("error", "portfolio_cb_tripped")
+                            break
+                        except Exception as cb_err:
+                            self.log("warning", f"Portfolio CB check error (non-fatal): {cb_err}")
+
                     self.write_heartbeat("running", "post_cycle")
                     self.write_session_state("running")
                 except Exception as e:
