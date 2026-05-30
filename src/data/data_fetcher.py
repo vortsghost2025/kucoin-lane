@@ -165,7 +165,7 @@ class DataFetchingAgent(BaseAgent):
             "current_price": price_data.get(currency, 0),
             "market_cap": price_data.get("market_cap", {}).get(currency, 0),
             "volume_24h": price_data.get("usd_24h_vol", 0),
-            "price_change_24h": price_data.get("usd_24h_change", 0),
+            "price_change_24h": price_data.get("usd", 0) * price_data.get("usd_24h_change", 0) / 100,
             "price_change_24h_pct": price_data.get("usd_24h_change", 0),
             "last_updated": datetime.utcnow().isoformat(),
             "currency": currency.upper(),

@@ -122,7 +122,7 @@ def _fetch_binance(coingecko_id: str) -> Optional[Dict[str, Any]]:
     try:
         price = float(data.get("lastPrice", 0))
         volume = float(data.get("quoteVolume", 0))
-        change = float(data.get("priceChange", 0))
+        change = float(data.get("priceChangePercent", 0))
     except (TypeError, ValueError):
         return None
 
@@ -151,7 +151,7 @@ def _fetch_kraken(coingecko_id: str) -> Optional[Dict[str, Any]]:
         price = float(ticker.get("c", [0])[0])
         open_price = float(ticker.get("o", 0))
         volume = float(ticker.get("v", [0])[1])
-        change = price - open_price
+        change = ((price - open_price) / open_price * 100) if open_price else 0.0
     except (TypeError, ValueError, IndexError):
         return None
 

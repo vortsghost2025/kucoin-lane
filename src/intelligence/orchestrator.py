@@ -740,7 +740,7 @@ class IntelligenceOrchestrator(BaseAgent):
                 self.logger.error("Market analysis failed - BLOCKING TRADES")
                 cycle_results["final_result"] = analysis_result
                 return analysis_result
-            elif not self._validate_agent_output(
+            if not self._validate_agent_output(
                 analysis_result, "MarketAnalysisAgent", ["analysis", "regime"]
             ):
                 cycle_results["final_result"] = self.create_message(
@@ -882,7 +882,7 @@ class IntelligenceOrchestrator(BaseAgent):
                 self.logger.error("Backtesting failed - BLOCKING TRADES")
                 cycle_results["final_result"] = backtest_result
                 return backtest_result
-            elif not self._validate_agent_output(
+            if not self._validate_agent_output(
                 backtest_result, "BacktestingAgent", ["backtest_results"]
             ):
                 cycle_results["final_result"] = self.create_message(
