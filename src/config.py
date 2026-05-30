@@ -136,7 +136,7 @@ ASSET_PROFILES = _load_asset_profiles()
 
 
 TRADING_CONFIG = {
-    "account_balance": float(os.getenv("ACCOUNT_BALANCE", "80")),
+    "account_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
     "paper_trading": os.getenv("PAPER_TRADING", "true").lower() == "true",
     "trading_pairs": os.getenv("TRADING_PAIRS", "SOL/USDT,BTC/USDT,ETH/USDT").split(
         ","
@@ -147,7 +147,7 @@ RISK_CONFIG = {
     "risk_per_trade": float(os.getenv("RISK_PER_TRADE", "0.005")),
     "min_risk_reward_ratio": float(os.getenv("MIN_RISK_REWARD_RATIO", "1.5")),
     "max_daily_loss": float(os.getenv("MAX_DAILY_LOSS", "0.05")),
-    "account_balance": float(os.getenv("ACCOUNT_BALANCE", "80")),
+    "account_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
     "min_signal_strength": float(os.getenv("MIN_SIGNAL_STRENGTH", "0.25")),
     "min_win_rate": float(os.getenv("MIN_WIN_RATE", "0.45")),
     "min_notional_usd": float(os.getenv("MIN_NOTIONAL_USD", "1.0")),

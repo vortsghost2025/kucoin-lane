@@ -995,7 +995,7 @@ def select_executor(dry_run: bool, live_trading: bool) -> ExecutionEngine:
         "max_daily_loss_usd": float(os.getenv("MAX_DAILY_LOSS_USD", "10.0")),
         "min_balance_usd": float(os.getenv("MIN_BALANCE_USD", "10.0")),
         "paper_trading": dry_run,
-        "account_balance": float(os.getenv("ACCOUNT_BALANCE", "80")),
+        "account_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
         "trading_pairs": os.getenv("TRADING_PAIRS", "SOL/USDT,BTC/USDT,ETH/USDT").split(","),
     }
 

@@ -7,7 +7,7 @@ class TestConfigModule:
         from src.config import TRADING_CONFIG
         assert "trading_pairs" in TRADING_CONFIG
         assert TRADING_CONFIG["paper_trading"] is True
-        assert TRADING_CONFIG["account_balance"] == 80.0
+        assert TRADING_CONFIG["account_balance"] == 10000.0
 
     def test_risk_config_defaults(self):
         from src.config import RISK_CONFIG

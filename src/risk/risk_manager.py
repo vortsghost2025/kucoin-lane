@@ -150,10 +150,20 @@ class RiskManagementAgent(BaseAgent):
                 all_approved = False
                 rejection_reason = f"Daily loss limit would be exceeded: {self.cumulative_risk_today + total_risk:.2f} > {self.account_balance * self.max_daily_loss:.2f}"
                 self.logger.warning(f"{rejection_reason}")
+            elif not all_approved:
+                rejected_pairs = [
+                    p for p, a in risk_assessments.items() if not a["position_approved"]
+                ]
+                rejection_reason = "; ".join(
+                    f"{p}: {risk_assessments[p].get('rejection_reason', 'unknown')}"
+                    for p in rejected_pairs
+                )
             else:
                 rejection_reason = None
 
-            self.log_execution_end("assess_and_size_position", success=all_approved)
+            self.log_execution_end("assess_and_size_position", success=True)
+
+            any_approved = any(a["position_approved"] for a in risk_assessments.values())
 
             if all_approved:
                 self.cumulative_risk_today += total_risk
@@ -162,8 +172,8 @@ class RiskManagementAgent(BaseAgent):
                 action="assess_and_size_position",
                 success=True,
                 data={
-                    "position_approved": all_approved,
-                    "rejection_reason": rejection_reason,
+                    "position_approved": any_approved,
+                    "rejection_reason": rejection_reason if not any_approved else None,
                     "assessments": risk_assessments,
                     "total_risk_amount": total_risk,
                     "total_risk_pct": (total_risk / self.account_balance) * 100,
@@ -419,7 +429,7 @@ class RiskManagementAgent(BaseAgent):
                 "signal_strength": signal_strength,
                 "backtest_win_rate": backtest_win_rate,
                 "position_approved": False,
-                "rejection_reason": "Position size exceeds account balance",
+                "rejection_reason": "insufficient_equity: position notional exceeds account balance",
                 "risk_reward_ratio": 0,
             }
 
@@ -471,9 +481,12 @@ class RiskManagementAgent(BaseAgent):
                 else 0,
             }
 
-        if self.enforce_min_position_size_only:
-            approval = position_size > 0
-            rejection_reason = None if approval else "Invalid position size"
+            if self.enforce_min_position_size_only:
+                approval = position_size > 0
+                if not approval:
+                    rejection_reason = "position_size_below_minimum"
+                else:
+                    rejection_reason = None
         else:
             approval, rejection_reason = self._validate_trade(
                 pair,

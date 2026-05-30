@@ -57,7 +57,7 @@ def run_report():
 
     pairs_str = os.getenv("TRADING_PAIRS", "SOL/USDT,BTC/USDT,ETH/USDT")
     pairs = [p.strip() for p in pairs_str.split(",") if p.strip()]
-    account_balance = float(os.getenv("ACCOUNT_BALANCE", "80"))
+    account_balance = float(os.getenv("ACCOUNT_BALANCE", "10000"))
 
     config = {
         "paper_trading": True,
