@@ -47,6 +47,45 @@ EXECUTION_MODE=live python -m src.deterministic_startup
 
 There is no systemd service for the trading bot itself. Only monitoring timers are installed. See Blocker B1 in the blocker matrix.
 
+### Docker Compose (Primary Runtime)
+
+The bot runs inside a Docker container managed by systemd + Docker Compose. This is the **primary runtime** for paper-live and live modes.
+
+```bash
+# Rebuild and restart (picks up code changes):
+systemctl --user reload kucoin-lane.service
+
+# Stop:
+systemctl --user stop kucoin-lane.service
+
+# Check status:
+systemctl --user status kucoin-lane.service
+docker ps -a --filter name=kucoin-lane
+```
+
+**How credentials reach the container:**
+
+1. `~/.config/kucoin-lane/credentials.env` — stores real KuCoin API keys (mode 0600)
+2. The systemd unit's `EnvironmentFile=` directive loads these vars into the host process
+3. `docker-compose.yml` `environment:` section references `${KUCOIN_API_KEY}` etc., which Docker Compose resolves from the host process environment
+4. Inside the container, `environment:` overrides `env_file:` — so the real keys take precedence over placeholders in `config/.env`
+
+> **Important:** `config/.env` contains placeholder values and is loaded via `env_file:`. The real keys come from the systemd `EnvironmentFile=`. If you see `KC-API-KEY not exists` errors, the compose `environment:` section is not receiving the real keys — check that `~/.config/kucoin-lane/credentials.env` exists and the systemd unit references it.
+
+**DNS inside the container:**
+
+The compose file specifies DNS servers (`1.1.1.1`, `8.8.8.8`) because the default Docker DNS resolver may fail to resolve `api.kucoin.com` in some network configurations. If you see `NameResolutionError` inside the container, verify the `dns:` section is present in `docker-compose.yml`.
+
+**Volume mounts:**
+
+| Host path | Container path | Purpose |
+|-----------|---------------|---------|
+| `./state` | `/app/state` | Bot state, heartbeat JSON |
+| `./logs` | `/app/logs` | Application logs |
+| `./agent-logs` | `/app/agent-logs` | Cycle reports, audit trail, return reports |
+| `./config/coin_parameters.json` | `/app/config/coin_parameters.json:ro` | Read-only trading pair config |
+| `../Archivist-Agent/lanes/kucoin` | `/app/lanes/kucoin` | Lane relay inbox/outbox |
+
 ---
 
 ## 2. Stopping the Bot
@@ -157,7 +196,10 @@ pytest tests/ -q --tb=no 2>&1 | tail -5
 | `heartbeat.status` | `running` (or `shutdown` if intentionally stopped) |
 | `SESSION_STATE.phase` | `trading` (or `terminating` during shutdown) |
 | `SESSION_STATE.is_final` | `false` (true = bot has stopped) |
-| Test suite | 302 passing |
+| Docker container | `Up` + `healthy` |
+| KuCoin auth (container) | `KuCoin authenticated connection verified` in logs |
+| Pipeline stages | `fetching_data → analyzing_market → backtesting → risk_assessment → monitoring` |
+| Test suite | 415 passing |
 | Monitoring timers | All 4 active (hourly, daily, weekly, monthly) |
 
 ### Unhealthy Patterns
@@ -192,6 +234,45 @@ If you see `ModuleNotFoundError` for `src.data` or `src`:
 If config loads but API key attributes are `None`:
 - Check `src/config.py` has module-level aliases for `KUCOIN_API_KEY` and `TRADING_MODE`
 - Fixed in commit `e286209` — ensure you're past that commit
+
+### Docker Container: `KC-API-KEY not exists` (Auth Failure)
+
+KuCoin returns error `400003: KC-API-KEY not exists` when the container receives placeholder keys instead of real ones.
+
+**Root cause:** The real keys are in `~/.config/kucoin-lane/credentials.env` (loaded by systemd `EnvironmentFile=`), but `docker-compose.yml` must reference them in the `environment:` section for Docker Compose to pass them into the container. If the `environment:` section doesn't include `- KUCOIN_API_KEY=${KUCOIN_API_KEY}` etc., the container only gets the placeholder values from `config/.env` via `env_file:`.
+
+**Fix:**
+1. Verify `~/.config/kucoin-lane/credentials.env` has real keys (lengths 24/36/14)
+2. Verify `docker-compose.yml` `environment:` section includes the KUCOIN vars
+3. Reload: `systemctl --user reload kucoin-lane.service`
+4. Verify inside container: `docker exec kucoin-lane env | grep KUCOIN_API_KEY | wc -c` (should be ~30+, not ~10)
+
+### Docker Container: DNS Resolution Failure
+
+If logs show `Failed to resolve 'api.kucoin.com'` or `[Errno -3] Temporary failure in name resolution`:
+
+**Root cause:** Docker's embedded DNS resolver (`127.0.0.11`) may not forward to working upstream DNS servers in some network configurations (especially Tailscale networks).
+
+**Fix:** Add `dns:` section to `docker-compose.yml`:
+```yaml
+dns:
+  - 1.1.1.1
+  - 8.8.8.8
+```
+Then reload: `systemctl --user reload kucoin-lane.service`
+
+Verify: `docker exec kucoin-lane python3 -c "import socket; print(socket.getaddrinfo('api.kucoin.com', 443)[:1])"`
+
+### Docker Container: agent-logs Write Failures
+
+If cycle reports fail with `Failed to write cycle report to agent-logs/`:
+
+**Root cause:** The `agent-logs/` directory either doesn't exist inside the container or isn't mounted as a volume.
+
+**Fix:**
+1. Create on host: `mkdir -p agent-logs`
+2. Verify `docker-compose.yml` volumes include `- ./agent-logs:/app/agent-logs`
+3. The orchestrator's `_write_cycle_artifacts()` creates the directory via `os.makedirs("agent-logs", exist_ok=True)`
 
 ### Test Failures
 
@@ -302,7 +383,10 @@ Follow the project's commit prefix style:
 
 Before switching from `dry_run` to `live` mode, verify ALL of:
 
-- [ ] `.env` configured with valid KuCoin API credentials
+- [ ] `.env` configured with valid KuCoin API credentials (real keys, not placeholders — lengths 24/36/14)
+- [ ] Docker container receives real keys: `docker exec kucoin-lane python3 -c "import os; print(len(os.environ['KUCOIN_API_KEY']))"` should print 24
+- [ ] KuCoin auth succeeds inside container: no `400003` errors in `docker logs kucoin-lane`
+- [ ] DNS resolution works inside container: `docker exec kucoin-lane python3 -c "import socket; socket.getaddrinfo('api.kucoin.com', 443)"`
 - [ ] Blocker B1 resolved: systemd service for the trading bot
 - [ ] Blocker B2 resolved: CircuitBreaker classes wired into runtime
 - [ ] Blocker B3 resolved: Auditor failures trigger circuit breaker (not just log)
@@ -311,5 +395,7 @@ Before switching from `dry_run` to `live` mode, verify ALL of:
 - [ ] Test suite passes: `pytest tests/ -q`
 - [ ] Monitoring timers active on headless
 - [ ] Telegram alerts configured (optional but recommended)
+- [ ] Pipeline runs end-to-end: `docker logs kucoin-lane | grep "Workflow:"` shows all stages (fetching_data → analyzing_market → backtesting → risk_assessment → monitoring)
+- [ ] `KUCOIN_USE_SANDBOX=false` in environment (sandbox is deprecated in SDK v2.2.0)
 
 See [memory/blocker-matrix.md](../memory/blocker-matrix.md) for full blocker details.
