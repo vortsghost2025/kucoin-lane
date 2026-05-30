@@ -754,79 +754,86 @@ class IntelligenceOrchestrator(BaseAgent):
                     success=False,
                     error="Unexpected MarketAnalysisAgent response",
                 )
-            return cycle_results["final_result"]
+                return cycle_results["final_result"]
+            self.logger.info("[PIPELINE-TRACE] past MarketAnalysisAgent validation block")
+            try:
+                self.logger.info(f"[PIPELINE-TRACE] about to extract analysis_data from analysis_result type={type(analysis_result)}")
+                analysis_data = analysis_result.get("data", {})
+                self.logger.info(f"[PIPELINE-TRACE] analysis_data type={type(analysis_data)}, keys={list(analysis_data.keys()) if isinstance(analysis_data, dict) else 'N/A'}")
+                self.logger.info("[PIPELINE-TRACE] about to extract market_regime")
+                market_regime = analysis_data.get("regime", "unknown")
+                self.logger.info(f"[PIPELINE-TRACE] market_regime={market_regime}, trading_paused={self.trading_paused}")
 
-            analysis_data = analysis_result.get("data", {})
-            market_regime = analysis_data.get("regime", "unknown")
-            self.logger.info(f"[PIPELINE-TRACE] market_regime={market_regime}, trading_paused={self.trading_paused}")
+                # ── Klines/OHLCV Intelligence: RegimeDetector + WhaleWatch ──
+                self.logger.info(f"[PIPELINE-TRACE] klines available: fetcher={self._klines_fetcher is not None}, adapter={self._exchange_adapter is not None}")
+                if self._klines_fetcher and self._exchange_adapter:
+                    try:
+                        for pair in market_symbols:
+                            df = self._klines_fetcher.fetch_klines(
+                                self._exchange_adapter, pair
+                            )
+                            if df is not None and not df.empty and len(df) >= 15:
+                                # Run ADX/ATR-based regime detection
+                                regime_result = self.regime_detector.analyze(df) if self.regime_detector else None
+                                # Run whale order flow analysis
+                                whale_result = self.whale_watch.analyze_order_flow(df) if self.whale_watch else None
 
-            # ── Klines/OHLCV Intelligence: RegimeDetector + WhaleWatch ──
-            self.logger.info(f"[PIPELINE-TRACE] klines available: fetcher={self._klines_fetcher is not None}, adapter={self._exchange_adapter is not None}")
-            if self._klines_fetcher and self._exchange_adapter:
-                try:
-                    for pair in market_symbols:
-                        df = self._klines_fetcher.fetch_klines(
-                            self._exchange_adapter, pair
-                        )
-                        if df is not None and not df.empty and len(df) >= 15:
-                            # Run ADX/ATR-based regime detection
-                            regime_result = self.regime_detector.analyze(df) if self.regime_detector else None
-                            # Run whale order flow analysis
-                            whale_result = self.whale_watch.analyze_order_flow(df) if self.whale_watch else None
+                                intel = {
+                                    "pair": pair,
+                                    "regime": regime_result,
+                                    "whale": whale_result,
+                                }
+                                cycle_results["intelligence_result"] = intel
 
-                            intel = {
-                                "pair": pair,
-                                "regime": regime_result,
-                                "whale": whale_result,
-                            }
-                            cycle_results["intelligence_result"] = intel
-
-                            # ADX-based regime can override the simplistic MarketAnalysisAgent regime
-                            if regime_result and regime_result.get("regime") != "UNKNOWN":
-                                adx_regime = regime_result["regime"]
-                                adx_rec = regime_result.get("recommendation", "")
-                                self.logger.info(
-                                    f"[INTELLIGENCE] ADX regime for {pair}: {adx_regime} "
-                                    f"(ADX: {regime_result.get('adx', 0):.1f}, "
-                                    f"ATR: {regime_result.get('atr_pct', 0):.2f}%, "
-                                    f"rec: {adx_rec})"
-                                )
-                                # ADX regime can override MarketAnalysisAgent's simplistic regime
-                                # ADX is more nuanced — trust it over the simple price-based check
-                                if adx_rec == "HALT_TRADING":
-                                    market_regime = "bearish"
-                                elif adx_regime == "RANGING_HIGH_VOL":
-                                    # High vol ranging — downgrade from bullish to neutral
-                                    if market_regime == "bullish":
-                                        market_regime = "neutral"
-                                    # Upgrade from bearish to neutral — ADX says ranging, not trending down
-                                    elif market_regime == "bearish":
+                                # ADX-based regime can override the simplistic MarketAnalysisAgent regime
+                                if regime_result and regime_result.get("regime") != "UNKNOWN":
+                                    adx_regime = regime_result["regime"]
+                                    adx_rec = regime_result.get("recommendation", "")
+                                    self.logger.info(
+                                        f"[INTELLIGENCE] ADX regime for {pair}: {adx_regime} "
+                                        f"(ADX: {regime_result.get('adx', 0):.1f}, "
+                                        f"ATR: {regime_result.get('atr_pct', 0):.2f}%, "
+                                        f"rec: {adx_rec})"
+                                    )
+                                    # ADX regime can override MarketAnalysisAgent's simplistic regime
+                                    # ADX is more nuanced — trust it over the simple price-based check
+                                    if adx_rec == "HALT_TRADING":
+                                        market_regime = "bearish"
+                                    elif adx_regime == "RANGING_HIGH_VOL":
+                                        # High vol ranging — downgrade from bullish to neutral
+                                        if market_regime == "bullish":
+                                            market_regime = "neutral"
+                                        # Upgrade from bearish to neutral — ADX says ranging, not trending down
+                                        elif market_regime == "bearish":
+                                            market_regime = "neutral"
+                                            self.logger.info(
+                                                f"[INTELLIGENCE] ADX override: {pair} bearish→neutral "
+                                                f"(ADX says RANGING_HIGH_VOL, not trending down)"
+                                            )
+                                    elif adx_regime in ("RANGING_LOW_VOL", "UNKNOWN") and market_regime == "bearish":
+                                        # Low-vol ranging or unknown ADX — also upgrade bearish to neutral
                                         market_regime = "neutral"
                                         self.logger.info(
                                             f"[INTELLIGENCE] ADX override: {pair} bearish→neutral "
-                                            f"(ADX says RANGING_HIGH_VOL, not trending down)"
-                                        )
-                                elif adx_regime in ("RANGING_LOW_VOL", "UNKNOWN") and market_regime == "bearish":
-                                    # Low-vol ranging or unknown ADX — also upgrade bearish to neutral
-                                    market_regime = "neutral"
-                                    self.logger.info(
-                                            f"[INTELLIGENCE] ADX override: {pair} bearish→neutral "
                                             f"(ADX says {adx_regime}, not confirming downtrend)"
-                                    )
+                                        )
 
-                            if whale_result:
-                                self.logger.info(
-                                    f"[INTELLIGENCE] Whale signal for {pair}: "
-                                    f"{whale_result.get('signal', 'NEUTRAL')} "
-                                    f"(CVD: {whale_result.get('cvd_ratio', 0.5):.1%})"
+                                if whale_result:
+                                    self.logger.info(
+                                        f"[INTELLIGENCE] Whale signal for {pair}: "
+                                        f"{whale_result.get('signal', 'NEUTRAL')} "
+                                        f"(CVD: {whale_result.get('cvd_ratio', 0.5):.1%})"
+                                    )
+                            else:
+                                self.logger.debug(
+                                    f"[INTELLIGENCE] No OHLCV data for {pair}, "
+                                    f"using MarketAnalysisAgent regime only"
                                 )
-                        else:
-                            self.logger.debug(
-                                f"[INTELLIGENCE] No OHLCV data for {pair}, "
-                                f"using MarketAnalysisAgent regime only"
-                            )
-                except Exception as e:
-                    self.logger.warning(f"[INTELLIGENCE] Klines analysis failed (non-fatal): {e}")
+                    except Exception as e:
+                        self.logger.warning(f"[INTELLIGENCE] Klines analysis failed (non-fatal): {e}")
+            except Exception as e:
+                self.logger.error(f"[PIPELINE-TRACE] UNEXPECTED EXCEPTION between analysis and backtesting: {e}", exc_info=True)
+                raise
 
             self.logger.info(f"[PIPELINE-TRACE] after klines: market_regime={market_regime}, skip_execution={locals().get('skip_execution', 'not_set')}")
 
