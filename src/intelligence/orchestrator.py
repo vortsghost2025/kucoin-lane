@@ -682,9 +682,9 @@ class IntelligenceOrchestrator(BaseAgent):
         try:
             self._reset_daily_risk_if_needed()
 
-        allowed, reason = self.is_trading_allowed()
-        self.logger.info(f"[PIPELINE-TRACE] is_trading_allowed: allowed={allowed}, reason={reason}")
-        if not allowed:
+            allowed, reason = self.is_trading_allowed()
+            self.logger.info(f"[PIPELINE-TRACE] is_trading_allowed: allowed={allowed}, reason={reason}")
+            if not allowed:
                 cycle_results["final_result"] = self.create_message(
                     action="orchestrate_workflow",
                     success=False,
@@ -699,28 +699,28 @@ class IntelligenceOrchestrator(BaseAgent):
             data_result = self._execute_agent_phase(
                 "DataFetchingAgent", "fetch_data", {"symbols": market_symbols}
             )
-        cycle_results["data_result"] = data_result
-        self.logger.info(f"[PIPELINE-TRACE] data_result: success={data_result.get('success')}")
+            cycle_results["data_result"] = data_result
+            self.logger.info(f"[PIPELINE-TRACE] data_result: success={data_result.get('success')}")
 
-        if not data_result["success"]:
+            if not data_result["success"]:
                 self.activate_circuit_breaker("Data fetching failed")
                 cycle_results["final_result"] = data_result
                 return data_result
 
-        self.logger.info(f"[PIPELINE-TRACE] DataFetchingAgent validation: {self._validate_agent_output(data_result, 'DataFetchingAgent', ['market_data'])}")
-        if not self._validate_agent_output(
-            data_result, "DataFetchingAgent", ["market_data"]
-        ):
-            cycle_results["final_result"] = self.create_message(
-                action="orchestrate_workflow",
-                success=False,
-                error="Unexpected DataFetchingAgent response",
-            )
-            return cycle_results["final_result"]
+            self.logger.info(f"[PIPELINE-TRACE] DataFetchingAgent validation: {self._validate_agent_output(data_result, 'DataFetchingAgent', ['market_data'])}")
+            if not self._validate_agent_output(
+                data_result, "DataFetchingAgent", ["market_data"]
+            ):
+                cycle_results["final_result"] = self.create_message(
+                    action="orchestrate_workflow",
+                    success=False,
+                    error="Unexpected DataFetchingAgent response",
+                )
+                return cycle_results["final_result"]
 
-        market_data = data_result.get("data", {}).get("market_data", {})
-        self.logger.info(f"[PIPELINE-TRACE] market_data valid: {self._validate_market_data(market_data)}")
-        if not self._validate_market_data(market_data):
+            market_data = data_result.get("data", {}).get("market_data", {})
+            self.logger.info(f"[PIPELINE-TRACE] market_data valid: {self._validate_market_data(market_data)}")
+            if not self._validate_market_data(market_data):
                 self.logger.error("No market data returned from DataFetchingAgent")
                 self.activate_circuit_breaker(
                     "Data fetching returned empty market data"
@@ -738,17 +738,17 @@ class IntelligenceOrchestrator(BaseAgent):
                 "analyze_market",
                 {"market_data": market_data},
             )
-        cycle_results["analysis_result"] = analysis_result
-        self.logger.info(f"[PIPELINE-TRACE] analysis_result: success={analysis_result.get('success')}, keys={list(analysis_result.get('data', {}).keys()) if isinstance(analysis_result.get('data'), dict) else 'N/A'}")
+            cycle_results["analysis_result"] = analysis_result
+            self.logger.info(f"[PIPELINE-TRACE] analysis_result: success={analysis_result.get('success')}, keys={list(analysis_result.get('data', {}).keys()) if isinstance(analysis_result.get('data'), dict) else 'N/A'}")
 
-        if not analysis_result["success"]:
+            if not analysis_result["success"]:
                 self.logger.error("Market analysis failed - BLOCKING TRADES")
                 cycle_results["final_result"] = analysis_result
                 return analysis_result
-        self.logger.info(f"[PIPELINE-TRACE] MarketAnalysisAgent validation: {self._validate_agent_output(analysis_result, 'MarketAnalysisAgent', ['analysis', 'regime'])}")
-        if not self._validate_agent_output(
-            analysis_result, "MarketAnalysisAgent", ["analysis", "regime"]
-        ):
+            self.logger.info(f"[PIPELINE-TRACE] MarketAnalysisAgent validation: {self._validate_agent_output(analysis_result, 'MarketAnalysisAgent', ['analysis', 'regime'])}")
+            if not self._validate_agent_output(
+                analysis_result, "MarketAnalysisAgent", ["analysis", "regime"]
+            ):
                 cycle_results["final_result"] = self.create_message(
                     action="orchestrate_workflow",
                     success=False,
@@ -757,12 +757,12 @@ class IntelligenceOrchestrator(BaseAgent):
             return cycle_results["final_result"]
 
             analysis_data = analysis_result.get("data", {})
-        market_regime = analysis_data.get("regime", "unknown")
-        self.logger.info(f"[PIPELINE-TRACE] market_regime={market_regime}, trading_paused={self.trading_paused}")
+            market_regime = analysis_data.get("regime", "unknown")
+            self.logger.info(f"[PIPELINE-TRACE] market_regime={market_regime}, trading_paused={self.trading_paused}")
 
-        # ── Klines/OHLCV Intelligence: RegimeDetector + WhaleWatch ──
-        self.logger.info(f"[PIPELINE-TRACE] klines available: fetcher={self._klines_fetcher is not None}, adapter={self._exchange_adapter is not None}")
-        if self._klines_fetcher and self._exchange_adapter:
+            # ── Klines/OHLCV Intelligence: RegimeDetector + WhaleWatch ──
+            self.logger.info(f"[PIPELINE-TRACE] klines available: fetcher={self._klines_fetcher is not None}, adapter={self._exchange_adapter is not None}")
+            if self._klines_fetcher and self._exchange_adapter:
                 try:
                     for pair in market_symbols:
                         df = self._klines_fetcher.fetch_klines(
@@ -825,12 +825,12 @@ class IntelligenceOrchestrator(BaseAgent):
                                 f"[INTELLIGENCE] No OHLCV data for {pair}, "
                                 f"using MarketAnalysisAgent regime only"
                             )
-        except Exception as e:
-            self.logger.warning(f"[INTELLIGENCE] Klines analysis failed (non-fatal): {e}")
+                except Exception as e:
+                    self.logger.warning(f"[INTELLIGENCE] Klines analysis failed (non-fatal): {e}")
 
-        self.logger.info(f"[PIPELINE-TRACE] after klines: market_regime={market_regime}, skip_execution={locals().get('skip_execution', 'not_set')}")
+            self.logger.info(f"[PIPELINE-TRACE] after klines: market_regime={market_regime}, skip_execution={locals().get('skip_execution', 'not_set')}")
 
-        if self.trading_paused and not self.circuit_breaker_active:
+            if self.trading_paused and not self.circuit_breaker_active:
                 if market_regime in ["neutral", "bullish"]:
                     if not self.resume_warning_given:
                         self.resume_warning_given = True
@@ -877,9 +877,9 @@ class IntelligenceOrchestrator(BaseAgent):
                 )
                 return cycle_results["final_result"]
 
-        self.transition_stage(WorkflowStage.BACKTESTING)
-        self.logger.info("[PIPELINE-TRACE] REACHED BACKTESTING STAGE")
-        backtest_result = self._execute_agent_phase(
+            self.transition_stage(WorkflowStage.BACKTESTING)
+            self.logger.info("[PIPELINE-TRACE] REACHED BACKTESTING STAGE")
+            backtest_result = self._execute_agent_phase(
                 "BacktestingAgent",
                 "backtest_signals",
                 {
