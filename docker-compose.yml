@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   kucoin-lane:
     build:
@@ -20,6 +18,7 @@ services:
     volumes:
       - ./state:/app/state
       - ./logs:/app/logs
+      - ./agent-logs:/app/agent-logs
       - ./config/coin_parameters.json:/app/config/coin_parameters.json:ro
       - ../Archivist-Agent/lanes/kucoin:/app/lanes/kucoin
     ports:

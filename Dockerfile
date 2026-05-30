@@ -17,6 +17,7 @@ COPY src/ src/
 COPY config/ config/
 COPY governance/ governance/
 COPY tests/ tests/
+COPY scripts/ scripts/
 
 ENV PYTHONPATH=/app
 ENV PYTHONUNBUFFERED=1

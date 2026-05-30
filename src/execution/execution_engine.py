@@ -430,6 +430,46 @@ class DryRunExecutor(ExecutionEngine):
         self.max_trades_per_session = config.get("max_trades_per_session", 2)
         self.load_backtest_data()
 
+        self.orchestrator = None
+        if config.get("paper_live", True):
+            try:
+                from ..intelligence.orchestrator import IntelligenceOrchestrator
+                from ..data.data_fetcher import DataFetchingAgent
+                from ..intelligence.market_analyzer import MarketAnalysisAgent
+                from ..intelligence.backtester import BacktestingAgent
+                from ..risk.risk_manager import RiskManagementAgent
+
+                orch_config = dict(config)
+                orch_config["paper_trading"] = True
+                orch_config["paper_live"] = False
+                self.orchestrator = IntelligenceOrchestrator(orch_config)
+                self.orchestrator.register_agent(DataFetchingAgent(orch_config))
+                self.orchestrator.register_agent(MarketAnalysisAgent(orch_config))
+                self.orchestrator.register_agent(BacktestingAgent(orch_config))
+                self.orchestrator.register_agent(RiskManagementAgent(orch_config))
+                exec_agent_config = dict(orch_config)
+                exec_agent_config["dry_run"] = True
+                exec_agent_config["live_trading"] = False
+                exec_agent_config["paper_live"] = False
+                self.orchestrator.register_agent(ExecutionAgent(exec_agent_config))
+                # Wire exchange adapter for klines/OHLCV fetching (enables RegimeDetector + WhaleWatch)
+                try:
+                    from ..execution.exchange_adapter import KuCoinAdapter
+                    # Adapter init now non-fatal on auth failure — klines are public
+                    klines_adapter = KuCoinAdapter(
+                        api_key=KUCOIN_API_KEY or "dummy",
+                        api_secret=KUCOIN_API_SECRET or "dummy",
+                        passphrase=KUCOIN_API_PASSPHRASE or "dummy",
+                    )
+                    self.orchestrator.set_exchange_adapter(klines_adapter)
+                    self.log("info", "Klines adapter wired — ADX/ATR regime detection active")
+                except Exception as klines_err:
+                    self.log("warning", f"Klines adapter setup failed (regime detection will use simplified mode): {klines_err}")
+                self.log("info", "PAPER-LIVE mode: orchestrator wired (live data + paper execution)")
+            except Exception as e:
+                self.log("warning", f"Orchestrator wiring failed, falling back to CSV-only: {e}")
+                self.orchestrator = None
+
     def load_backtest_data(self) -> None:
         self.log("info", "Loading backtest data from CSV files...")
         self.backtest_data = {}
@@ -447,11 +487,27 @@ class DryRunExecutor(ExecutionEngine):
                 self.log("warning", f"Failed to load {csv_file}: {e}")
 
     def run_cycle(self):
-        self.log("info", "Running backtest strategy analysis on cached OHLCV data...")
-        self.log(
-            "info",
-            f"Backtest cycle {self.cycle_count} complete - 0 trades executed",
-        )
+        if self.orchestrator is not None:
+            self.log("info", "Running paper-live strategy cycle with live market data...")
+            try:
+                symbols = self.config.get("trading_pairs", ["SOL/USDT", "BTC/USDT", "ETH/USDT"])
+                result = self.orchestrator.execute(market_symbols=symbols)
+                if isinstance(result, dict):
+                    data = result.get("data", {})
+                    trade_exec = data.get("trade_executed", False)
+                    reason = data.get("reason", "")
+                    if trade_exec:
+                        self.log("info", f"Paper trade executed: {data.get('execution', {})}")
+                    else:
+                        self.log("info", f"No trade this cycle: {reason}")
+            except Exception as e:
+                self.log("error", f"Orchestrator cycle error: {e}")
+        else:
+            self.log("info", "Running backtest strategy analysis on cached OHLCV data...")
+            self.log(
+                "info",
+                f"Backtest cycle {self.cycle_count} complete - 0 trades executed",
+            )
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         market_data = input_data.get("market_data", {})
@@ -553,9 +609,10 @@ class LiveExecutor(ExecutionEngine):
             self.adapter = KuCoinAdapter(
                 api_key=KUCOIN_API_KEY,
                 api_secret=KUCOIN_API_SECRET,
-                api_passphrase=KUCOIN_API_PASSPHRASE,
+                passphrase=KUCOIN_API_PASSPHRASE,
             )
-            self.adapter.connect()
+            # Note: connect() removed — KuCoinAdapter.__init__() already creates
+            # the SDK client and verifies connection via _test_connection()
             self.log("info", "Live API adapter initialized successfully")
         except Exception as e:
             self.log("error", f"Failed to initialize live adapter: {e}")
@@ -930,16 +987,20 @@ def select_executor(dry_run: bool, live_trading: bool) -> ExecutionEngine:
     config = {
         "dry_run": dry_run,
         "live_trading": live_trading,
+        "paper_live": True,
         "position_size_usd": float(POSITION_SIZE_USD),
         "monitor_interval_min": int(MONITOR_INTERVAL_MIN),
         "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "10.0")),
         "max_trade_loss_usd": float(os.getenv("MAX_TRADE_LOSS_USD", "5.0")),
         "max_daily_loss_usd": float(os.getenv("MAX_DAILY_LOSS_USD", "10.0")),
         "min_balance_usd": float(os.getenv("MIN_BALANCE_USD", "10.0")),
+        "paper_trading": dry_run,
+        "account_balance": float(os.getenv("ACCOUNT_BALANCE", "80")),
+        "trading_pairs": os.getenv("TRADING_PAIRS", "SOL/USDT,BTC/USDT,ETH/USDT").split(","),
     }
 
     if dry_run:
-        logger.info("STARTING DRY_RUN MODE (Backtesting only)")
+        logger.info("STARTING DRY_RUN MODE (Paper-Live: live data + paper execution)")
         return DryRunExecutor(config)
 
     if live_trading and not dry_run:
@@ -949,3 +1010,23 @@ def select_executor(dry_run: bool, live_trading: bool) -> ExecutionEngine:
     raise RuntimeError(
         "Invalid mode: either DRY_RUN must be True or LIVE_TRADING must be True"
     )
+
+
+if __name__ == "__main__":
+    import sys
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        stream=sys.stdout,
+    )
+
+    from ..deterministic_startup import DeterministicStartup
+
+    startup = DeterministicStartup()
+    startup.cleanup_leftover_state()
+    startup.verify_critical_systems(required_systems=["working_directory", "heartbeat_io", "kucoin_api"])
+
+    interval = int(os.getenv("CYCLE_INTERVAL", str(MONITOR_INTERVAL_MIN)))
+    executor = select_executor(DRY_RUN, LIVE_TRADING)
+    executor.run_continuous(interval_minutes=interval)

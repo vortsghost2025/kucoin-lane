@@ -39,6 +39,7 @@ from ..risk.portfolio_circuit_breaker import (
 from .regime_detector import RegimeDetector
 from .lead_lag import LeadLagMonitor
 from .whale_watch import WhaleWatch
+from ..data.kucoin_klines_fetcher import KuCoinKlinesFetcher
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +164,10 @@ class IntelligenceOrchestrator(BaseAgent):
             self.logger.warning(f"CircuitBreaker init failed, using no-op fallback: {e}")
             self.circuit_breaker = None
 
+        # Klines/OHLCV fetcher for RegimeDetector + WhaleWatch
+        self._klines_fetcher: Optional[KuCoinKlinesFetcher] = None
+        self._exchange_adapter = None  # set via set_exchange_adapter()
+
         self.consecutive_notional_rejections = 0
         self.notional_rejection_threshold = config.get(
             "notional_rejection_threshold", DEFAULT_NOTIONAL_REJECTION_THRESHOLD
@@ -180,6 +185,20 @@ class IntelligenceOrchestrator(BaseAgent):
     def register_agent(self, agent: BaseAgent) -> None:
         self.agent_registry[agent.agent_name] = agent
         self.logger.info(f"Registered agent: {agent.agent_name}")
+
+    def set_exchange_adapter(self, adapter) -> None:
+        """Set the exchange adapter for kline data fetching.
+
+        The adapter must implement get_klines(symbol, interval, start, end).
+        This enables RegimeDetector and WhaleWatch to receive live OHLCV data.
+        """
+        self._exchange_adapter = adapter
+        self._klines_fetcher = KuCoinKlinesFetcher(
+            default_interval="5min",
+            default_candle_count=100,
+            cache_enabled=True,
+        )
+        self.logger.info("Exchange adapter set — klines/OHLCV fetching enabled")
 
     def pause_trading(self, reason: str) -> None:
         self.trading_paused = True
@@ -729,10 +748,77 @@ class IntelligenceOrchestrator(BaseAgent):
                     success=False,
                     error="Unexpected MarketAnalysisAgent response",
                 )
-                return cycle_results["final_result"]
+            return cycle_results["final_result"]
 
             analysis_data = analysis_result.get("data", {})
             market_regime = analysis_data.get("regime", "unknown")
+
+            # ── Klines/OHLCV Intelligence: RegimeDetector + WhaleWatch ──
+            if self._klines_fetcher and self._exchange_adapter:
+                try:
+                    for pair in market_symbols:
+                        df = self._klines_fetcher.fetch_klines(
+                            self._exchange_adapter, pair
+                        )
+                        if df is not None and not df.empty and len(df) >= 15:
+                            # Run ADX/ATR-based regime detection
+                            regime_result = self.regime_detector.analyze(df) if self.regime_detector else None
+                            # Run whale order flow analysis
+                            whale_result = self.whale_watch.analyze_order_flow(df) if self.whale_watch else None
+
+                            intel = {
+                                "pair": pair,
+                                "regime": regime_result,
+                                "whale": whale_result,
+                            }
+                            cycle_results["intelligence_result"] = intel
+
+                            # ADX-based regime can override the simplistic MarketAnalysisAgent regime
+                            if regime_result and regime_result.get("regime") != "UNKNOWN":
+                                adx_regime = regime_result["regime"]
+                                adx_rec = regime_result.get("recommendation", "")
+                                self.logger.info(
+                                    f"[INTELLIGENCE] ADX regime for {pair}: {adx_regime} "
+                                    f"(ADX: {regime_result.get('adx', 0):.1f}, "
+                                    f"ATR: {regime_result.get('atr_pct', 0):.2f}%, "
+                                    f"rec: {adx_rec})"
+                                )
+                                # ADX regime can override MarketAnalysisAgent's simplistic regime
+                                # ADX is more nuanced — trust it over the simple price-based check
+                                if adx_rec == "HALT_TRADING":
+                                    market_regime = "bearish"
+                                elif adx_regime == "RANGING_HIGH_VOL":
+                                    # High vol ranging — downgrade from bullish to neutral
+                                    if market_regime == "bullish":
+                                        market_regime = "neutral"
+                                    # Upgrade from bearish to neutral — ADX says ranging, not trending down
+                                    elif market_regime == "bearish":
+                                        market_regime = "neutral"
+                                        self.logger.info(
+                                            f"[INTELLIGENCE] ADX override: {pair} bearish→neutral "
+                                            f"(ADX says RANGING_HIGH_VOL, not trending down)"
+                                        )
+                                elif adx_regime in ("RANGING_LOW_VOL", "UNKNOWN") and market_regime == "bearish":
+                                    # Low-vol ranging or unknown ADX — also upgrade bearish to neutral
+                                    market_regime = "neutral"
+                                    self.logger.info(
+                                            f"[INTELLIGENCE] ADX override: {pair} bearish→neutral "
+                                            f"(ADX says {adx_regime}, not confirming downtrend)"
+                                    )
+
+                            if whale_result:
+                                self.logger.info(
+                                    f"[INTELLIGENCE] Whale signal for {pair}: "
+                                    f"{whale_result.get('signal', 'NEUTRAL')} "
+                                    f"(CVD: {whale_result.get('cvd_ratio', 0.5):.1%})"
+                                )
+                        else:
+                            self.logger.debug(
+                                f"[INTELLIGENCE] No OHLCV data for {pair}, "
+                                f"using MarketAnalysisAgent regime only"
+                            )
+                except Exception as e:
+                    self.logger.warning(f"[INTELLIGENCE] Klines analysis failed (non-fatal): {e}")
 
             if self.trading_paused and not self.circuit_breaker_active:
                 if market_regime in ["neutral", "bullish"]:
@@ -762,18 +848,18 @@ class IntelligenceOrchestrator(BaseAgent):
                 else:
                     self.resume_warning_given = False
 
+            skip_execution = False
             if market_regime == "bearish" and not self.trading_paused:
                 self.pause_trading(
                     "Bearish market regime detected - downtrend protection active"
                 )
-                cycle_results["final_result"] = self.create_message(
-                    action="orchestrate_workflow",
-                    success=True,
-                    data={"trading_paused": True, "reason": "bearish_regime"},
+                self.logger.warning(
+                    "[BEARISH] Bearish regime detected — will run backtest+risk for visibility, skip execution"
                 )
-                return cycle_results["final_result"]
+                skip_execution = True
 
-            if self.trading_paused:
+            if self.trading_paused and not skip_execution:
+                # Trading paused for non-bearish reasons (circuit breaker, manual pause) — skip pipeline
                 cycle_results["final_result"] = self.create_message(
                     action="orchestrate_workflow",
                     success=True,
@@ -880,21 +966,29 @@ class IntelligenceOrchestrator(BaseAgent):
                 )
                 return cycle_results["final_result"]
 
-            self.transition_stage(WorkflowStage.EXECUTING)
-            exec_result = self._execute_agent_phase(
-                "ExecutionAgent",
-                "execute_trade",
-                {
-                    "market_data": market_data,
-                    "position_size": risk_data.get("position_size"),
-                    "stop_loss": risk_data.get("stop_loss"),
-                    "take_profit": risk_data.get("take_profit"),
-                    "paper_trading": self.is_paper_trading,
-                    "account_balance": risk_data.get("account_balance"),
-                    "position_approved": risk_data.get("position_approved", False),
-                    "risk_approved": risk_data.get("position_approved", False),
-                },
-            )
+            if skip_execution:
+                self.logger.info("[BEARISH] Skipping execution — bearish regime active, backtest+risk completed for visibility")
+                exec_result = self.create_message(
+                    action="execute_trade",
+                    success=True,
+                    data={"trade_executed": False, "reason": "bearish_regime_skip"},
+                )
+            else:
+                self.transition_stage(WorkflowStage.EXECUTING)
+                exec_result = self._execute_agent_phase(
+                    "ExecutionAgent",
+                    "execute_trade",
+                    {
+                        "market_data": market_data,
+                        "position_size": risk_data.get("position_size"),
+                        "stop_loss": risk_data.get("stop_loss"),
+                        "take_profit": risk_data.get("take_profit"),
+                        "paper_trading": self.is_paper_trading,
+                        "account_balance": risk_data.get("account_balance"),
+                        "position_approved": risk_data.get("position_approved", False),
+                        "risk_approved": risk_data.get("position_approved", False),
+                    },
+                )
             cycle_results["exec_result"] = exec_result
 
             if not self._validate_agent_output(
@@ -1116,6 +1210,7 @@ class IntelligenceOrchestrator(BaseAgent):
         audit_data: Dict[str, Any],
         cycle_start: float,
     ) -> None:
+        os.makedirs("agent-logs", exist_ok=True)
         ts = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%S")
         iso_ts = datetime.utcnow().isoformat()
         result = cycle_results.get("final_result", {})

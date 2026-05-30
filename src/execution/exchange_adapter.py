@@ -3,9 +3,12 @@ Unified exchange adapter for multi-exchange support.
 Abstracts KuCoin and Binance (testnet/live) behind a common interface.
 """
 
+import logging
 import os
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
+
+logger = logging.getLogger(__name__)
 
 import requests
 import hmac
@@ -51,6 +54,27 @@ class ExchangeAdapter(ABC):
         pass
 
     @abstractmethod
+    def get_klines(
+        self,
+        symbol: str,
+        interval: str = "5min",
+        start: Optional[int] = None,
+        end: Optional[int] = None,
+    ) -> List[List]:
+        """Fetch OHLCV kline/candle data from the exchange.
+
+        Args:
+            symbol: Trading pair in BASE/QUOTE format (e.g., "SOL/USDT")
+            interval: Candle interval (e.g., "1min", "5min", "15min", "1hour", "1day")
+            start: Optional start timestamp (unix seconds)
+            end: Optional end timestamp (unix seconds)
+
+        Returns:
+            List of candle data lists (exchange-specific format)
+        """
+        pass
+
+    @abstractmethod
     def borrow(self, asset: str, amount: float) -> Dict[str, Any]:
         pass
 
@@ -74,11 +98,14 @@ class KuCoinAdapter(ExchangeAdapter):
                 "kucoin-python not installed. Run: pip install python-kucoin"
             )
 
-        self.sandbox = os.getenv("KUCOIN_USE_SANDBOX", "true").lower() == "true"
+        self.sandbox = os.getenv("KUCOIN_USE_SANDBOX", "false").lower() == "true"
+        # NOTE: Sandbox was decommissioned in SDK v2.2.0 — default is now false.
+        # Also: openapi-v2.kucoin.com is stale; the current production URL is api.kucoin.com
+        # The SDK uses its own internal API_URL, but we store the canonical URL for reference.
         base_url = (
             "https://openapi-sandbox.kucoin.com"
             if self.sandbox
-            else "https://openapi-v2.kucoin.com"
+            else "https://api.kucoin.com"
         )
 
         super().__init__(
@@ -102,7 +129,7 @@ class KuCoinAdapter(ExchangeAdapter):
                     f"KuCoin sandbox mode deprecated in SDK v2.2.0, falling back to production: {sandbox_err}"
                 )
                 self.sandbox = False
-                self.base_url = "https://openapi-v2.kucoin.com"
+                self.base_url = "https://api.kucoin.com"
                 self.kucoin_client = KuCoinClient(
                     api_key=api_key,
                     api_secret=api_secret,
@@ -114,10 +141,19 @@ class KuCoinAdapter(ExchangeAdapter):
         self._test_connection()
 
     def _test_connection(self) -> None:
+        """Test authenticated API connection. Non-fatal: logs a warning if auth fails.
+        Public endpoints (klines, tickers) still work without authentication.
+        Auth-dependent methods (balance, orders) will fail at call-time with a clear error.
+        """
         try:
             self.kucoin_client.get_accounts()
+            logger.info("KuCoin authenticated connection verified")
         except Exception as e:
-            raise RuntimeError(f"KuCoin API connection failed: {e}")
+            logger.warning(
+                f"KuCoin authenticated connection failed: {e}. "
+                f"Public endpoints (klines, tickers) still available. "
+                f"Auth-dependent methods (balance, orders) will fail at call-time."
+            )
 
     @staticmethod
     def _format_symbol(pair: str) -> str:
@@ -204,6 +240,31 @@ class KuCoinAdapter(ExchangeAdapter):
             "ask": float(ticker.get("bestAsk", 0)),
             "last": float(ticker.get("price", 0)),
         }
+
+    def get_klines(
+        self,
+        symbol: str,
+        interval: str = "5min",
+        start: Optional[int] = None,
+        end: Optional[int] = None,
+    ) -> List[List]:
+        """Fetch kline/candle data from KuCoin.
+
+        NOTE: KuCoin klines endpoint is PUBLIC (no auth required).
+        Returns raw KuCoin format: [timestamp, open, close, high, low, volume_base, volume_quote]
+        This is NOT standard OHLCV order — high/low are swapped with close.
+        """
+        kucoin_symbol = self._format_symbol(symbol)
+        try:
+            return self.kucoin_client.get_kline_data(
+                symbol=kucoin_symbol,
+                kline_type=interval,
+                start=start,
+                end=end,
+            )
+        except Exception as e:
+            logger.warning(f"KuCoin klines fetch failed for {kucoin_symbol}: {e}")
+            return []
 
     def borrow(self, asset: str, amount: float) -> Dict[str, Any]:
         result = self.kucoin_client.create_borrow_order(
