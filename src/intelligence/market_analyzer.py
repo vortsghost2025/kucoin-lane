@@ -197,7 +197,7 @@ class MarketAnalysisAgent(BaseAgent):
             "volatility_approved": volatility_approved,
             "regime": regime,
             "buy_signal": signal,
-            "signal_strength": abs(signal - 50) / 50,
+            "signal_strength": min(1.0, ((abs(signal - 50) / 50) ** 0.5) * 1.5),
             "recommendation": "BUY"
             if signal > buy_threshold
             else "SELL"
@@ -263,14 +263,11 @@ class MarketAnalysisAgent(BaseAgent):
 
         signal = 50
 
-        signal += price_change * (1.5 * momentum_weight)
+        signal += price_change * (3.0 * momentum_weight)
         signal += (rsi - 50) * rsi_weight
 
-        if abs(price_change) < 0.5 and abs(rsi - 50) < 5:
-            signal = 50 + (signal - 50) * 0.3
-            self.logger.debug(
-                f"[{pair}][SIGNAL SUPPRESSION] Very weak momentum: price_chg={price_change:.2f}%, rsi={rsi:.1f} -> signal={signal:.1f}"
-            )
+        # Signal suppression removed — dampening already-weak signals prevents
+        # any trade from reaching the signal_strength threshold (0.45 for sideways)
 
         return max(0, min(100, signal))
 

@@ -200,6 +200,11 @@ class IntelligenceOrchestrator(BaseAgent):
         )
         self.logger.info("Exchange adapter set — klines/OHLCV fetching enabled")
 
+        # Also wire to BacktestingAgent if registered
+        backtest_agent = self.agent_registry.get("BacktestingAgent")
+        if backtest_agent and hasattr(backtest_agent, "set_klines_infrastructure"):
+            backtest_agent.set_klines_infrastructure(self._klines_fetcher, adapter)
+
     def pause_trading(self, reason: str) -> None:
         self.trading_paused = True
         self.pause_reason = reason
@@ -764,6 +769,51 @@ class IntelligenceOrchestrator(BaseAgent):
                             regime_result = self.regime_detector.analyze(df) if self.regime_detector else None
                             # Run whale order flow analysis
                             whale_result = self.whale_watch.analyze_order_flow(df) if self.whale_watch else None
+
+                            # Run full intelligence analysis (combines regime + whale + lead-lag)
+                            intel_analysis = self.analyze_market(df, symbol=pair)
+                            pair_analysis_from_market = analysis_data.get("analysis", {}).get(pair, {})
+                            if isinstance(pair_analysis_from_market, dict):
+                                intel_confidence = intel_analysis.get("confidence", 0.0)
+                                intel_multiplier = intel_analysis.get("position_multiplier", 1.0)
+                                intel_action = intel_analysis.get("action", "HOLD")
+                                base_strength = pair_analysis_from_market.get("signal_strength", 0.0)
+                                if intel_action in ("BUY",) and intel_confidence > 0.6:
+                                    boost = intel_confidence * intel_multiplier
+                                    boosted_strength = min(1.0, base_strength + boost * 0.3)
+                                    pair_analysis_from_market["signal_strength"] = boosted_strength
+                                    pair_analysis_from_market["intelligence_boost"] = {
+                                        "base_strength": base_strength,
+                                        "boost": boost * 0.3,
+                                        "intel_action": intel_action,
+                                        "intel_confidence": intel_confidence,
+                                        "intel_multiplier": intel_multiplier,
+                                    }
+                                    self.logger.info(
+                                        f"[INTELLIGENCE] {pair} signal_strength boosted: "
+                                        f"{base_strength:.3f} → {boosted_strength:.3f} "
+                                        f"(action={intel_action}, confidence={intel_confidence:.2f}, "
+                                        f"multiplier={intel_multiplier:.2f})"
+                                    )
+                                elif intel_action == "EXIT_ALL":
+                                    pair_analysis_from_market["signal_strength"] = 0.0
+                                    pair_analysis_from_market["intelligence_boost"] = {
+                                        "base_strength": base_strength,
+                                        "boost": -base_strength,
+                                        "intel_action": intel_action,
+                                        "intel_confidence": intel_confidence,
+                                        "intel_multiplier": 0.0,
+                                    }
+                                    self.logger.warning(
+                                        f"[INTELLIGENCE] {pair} signal_strength killed: "
+                                        f"EXIT_ALL from intelligence"
+                                    )
+                                pair_analysis_from_market["intelligence"] = {
+                                    "action": intel_action,
+                                    "confidence": intel_confidence,
+                                    "position_multiplier": intel_multiplier,
+                                    "reasoning": intel_analysis.get("reasoning", ""),
+                                }
 
                             intel = {
                                 "pair": pair,

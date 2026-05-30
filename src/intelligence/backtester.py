@@ -10,6 +10,7 @@ from datetime import datetime
 
 from ..base_agent import BaseAgent, AgentStatus
 from ..config import BACKTEST_CONFIG as GLOBAL_BACKTEST_CONFIG
+from .historical_backtester import HistoricalBacktester
 
 
 DEFAULT_ASSET_FACTOR = {
@@ -59,6 +60,10 @@ class BacktestingAgent(BaseAgent):
             }
         else:
             self.asset_performance_factors = {}
+
+        self.historical_backtester = HistoricalBacktester()
+        self._klines_fetcher = None
+        self._exchange_adapter = None
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         self.log_execution_start("backtest_signals")
@@ -123,6 +128,47 @@ class BacktestingAgent(BaseAgent):
         }
         win_rate_multiplier = asset_factor["win_rate_multiplier"]
         drawdown_adjustment = asset_factor["max_drawdown_adjustment"]
+
+        # Try real historical backtest first
+        historical_result = self.historical_backtester.backtest_pair(
+            pair, analysis, self._klines_fetcher, self._exchange_adapter
+        )
+        if historical_result is not None:
+            win_rate = historical_result.get("win_rate", 0.5)
+            max_drawdown = historical_result.get("max_drawdown", 0.08)
+            signal_valid = historical_result.get("signal_valid", True)
+            validation_reason = historical_result.get("validation_reason", "")
+            confidence = historical_result.get("confidence", win_rate)
+            recommendation = historical_result.get("recommendation", "PROCEED")
+            data_source = historical_result.get("data_source", "klines_historical")
+            total_trades = historical_result.get("total_trades", 0)
+            self.logger.info(
+                f"[BACKTEST] {pair}: Using HISTORICAL data ({data_source}), "
+                f"{total_trades} trades, win_rate={win_rate:.1%}, dd={max_drawdown:.1%}"
+            )
+            return {
+                "pair": pair,
+                "signal_type": signal_type,
+                "win_rate": win_rate,
+                "max_drawdown": max_drawdown,
+                "trades_analyzed": max(total_trades, 1),
+                "signal_valid": signal_valid,
+                "validation_reason": validation_reason,
+                "confidence": confidence,
+                "recommendation": recommendation,
+                "asset_adjustment": {
+                    "pair": pair,
+                    "win_rate_multiplier": win_rate_multiplier,
+                    "drawdown_adjustment": drawdown_adjustment,
+                },
+                "data_source": data_source,
+            }
+
+        # Fall back to formula-based estimation (no klines data available)
+        self.logger.warning(
+            f"[BACKTEST] {pair}: No klines data available, "
+            f"using formula-based estimation (less reliable)"
+        )
 
         if signal_type == "BUY":
             simulated_win_rate = self._calculate_buy_signal_win_rate(
@@ -235,3 +281,9 @@ class BacktestingAgent(BaseAgent):
     def add_historical_data(self, pair: str, data: Dict[str, Any]) -> None:
         self.historical_data[pair] = data
         self.logger.info(f"Added historical data for {pair}")
+
+    def set_klines_infrastructure(self, klines_fetcher, exchange_adapter) -> None:
+        """Set klines fetcher and exchange adapter for historical backtesting."""
+        self._klines_fetcher = klines_fetcher
+        self._exchange_adapter = exchange_adapter
+        self.logger.info("Historical backtesting infrastructure wired")

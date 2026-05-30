@@ -4,6 +4,7 @@ from .lead_lag import LeadLagMonitor
 from .whale_watch import WhaleWatch
 from .market_analyzer import MarketAnalysisAgent
 from .backtester import BacktestingAgent
+from .historical_backtester import HistoricalBacktester
 
 __all__ = [
     "IntelligenceOrchestrator",
@@ -12,4 +13,5 @@ __all__ = [
     "WhaleWatch",
     "MarketAnalysisAgent",
     "BacktestingAgent",
+    "HistoricalBacktester",
 ]
