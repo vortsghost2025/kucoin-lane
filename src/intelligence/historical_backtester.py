@@ -83,7 +83,7 @@ class HistoricalBacktester:
                 else f"Win rate {metrics['win_rate']:.1%} or drawdown "
                      f"{metrics['max_drawdown']:.1%} outside acceptable range"
             )
-            metrics["confidence"] = metrics["win_rate"] if metrics["signal_valid"] else 0
+            metrics["confidence"] = metrics["win_rate"]
             metrics["recommendation"] = "PROCEED" if metrics["signal_valid"] else "SKIP"
 
             logger.info(

@@ -770,102 +770,102 @@ class IntelligenceOrchestrator(BaseAgent):
                             # Run whale order flow analysis
                             whale_result = self.whale_watch.analyze_order_flow(df) if self.whale_watch else None
 
-                            # Run full intelligence analysis (combines regime + whale + lead-lag)
-                            intel_analysis = self.analyze_market(df, symbol=pair)
-                            pair_analysis_from_market = analysis_data.get("analysis", {}).get(pair, {})
-                            if isinstance(pair_analysis_from_market, dict):
-                                intel_confidence = intel_analysis.get("confidence", 0.0)
-                                intel_multiplier = intel_analysis.get("position_multiplier", 1.0)
-                                intel_action = intel_analysis.get("action", "HOLD")
-                                base_strength = pair_analysis_from_market.get("signal_strength", 0.0)
-                                if intel_action in ("BUY",) and intel_confidence > 0.6:
-                                    boost = intel_confidence * intel_multiplier
-                                    boosted_strength = min(1.0, base_strength + boost * 0.3)
-                                    pair_analysis_from_market["signal_strength"] = boosted_strength
-                                    pair_analysis_from_market["intelligence_boost"] = {
-                                        "base_strength": base_strength,
-                                        "boost": boost * 0.3,
-                                        "intel_action": intel_action,
-                                        "intel_confidence": intel_confidence,
-                                        "intel_multiplier": intel_multiplier,
-                                    }
-                                    self.logger.info(
-                                        f"[INTELLIGENCE] {pair} signal_strength boosted: "
-                                        f"{base_strength:.3f} → {boosted_strength:.3f} "
-                                        f"(action={intel_action}, confidence={intel_confidence:.2f}, "
-                                        f"multiplier={intel_multiplier:.2f})"
-                                    )
-                                elif intel_action == "EXIT_ALL":
-                                    pair_analysis_from_market["signal_strength"] = 0.0
-                                    pair_analysis_from_market["intelligence_boost"] = {
-                                        "base_strength": base_strength,
-                                        "boost": -base_strength,
-                                        "intel_action": intel_action,
-                                        "intel_confidence": intel_confidence,
-                                        "intel_multiplier": 0.0,
-                                    }
-                                    self.logger.warning(
-                                        f"[INTELLIGENCE] {pair} signal_strength killed: "
-                                        f"EXIT_ALL from intelligence"
-                                    )
-                                pair_analysis_from_market["intelligence"] = {
-                                    "action": intel_action,
-                                    "confidence": intel_confidence,
-                                    "position_multiplier": intel_multiplier,
-                                    "reasoning": intel_analysis.get("reasoning", ""),
+                        # Run full intelligence analysis (combines regime + whale + lead-lag)
+                        intel_analysis = self.analyze_market(df, symbol=pair)
+                        pair_analysis_from_market = analysis_data.get("analysis", {}).get(pair, {})
+                        if isinstance(pair_analysis_from_market, dict):
+                            intel_confidence = intel_analysis.get("confidence", 0.0)
+                            intel_multiplier = intel_analysis.get("position_multiplier", 1.0)
+                            intel_action = intel_analysis.get("action", "HOLD")
+                            base_strength = pair_analysis_from_market.get("signal_strength", 0.0)
+                            if intel_action in ("BUY",) and intel_confidence > 0.6:
+                                boost = intel_confidence * intel_multiplier
+                                boosted_strength = min(1.0, base_strength + boost * 0.15)
+                                pair_analysis_from_market["signal_strength"] = boosted_strength
+                                pair_analysis_from_market["intelligence_boost"] = {
+                                    "base_strength": base_strength,
+                                    "boost": boost * 0.15,
+                                    "intel_action": intel_action,
+                                    "intel_confidence": intel_confidence,
+                                    "intel_multiplier": intel_multiplier,
                                 }
-
-                            intel = {
-                                "pair": pair,
-                                "regime": regime_result,
-                                "whale": whale_result,
-                            }
-                            cycle_results["intelligence_result"] = intel
-
-                            # ADX-based regime can override the simplistic MarketAnalysisAgent regime
-                            if regime_result and regime_result.get("regime") != "UNKNOWN":
-                                adx_regime = regime_result["regime"]
-                                adx_rec = regime_result.get("recommendation", "")
                                 self.logger.info(
-                                    f"[INTELLIGENCE] ADX regime for {pair}: {adx_regime} "
-                                    f"(ADX: {regime_result.get('adx', 0):.1f}, "
-                                    f"ATR: {regime_result.get('atr_pct', 0):.2f}%, "
-                                    f"rec: {adx_rec})"
+                                    f"[INTELLIGENCE] {pair} signal_strength boosted: "
+                                    f"{base_strength:.3f} → {boosted_strength:.3f} "
+                                    f"(action={intel_action}, confidence={intel_confidence:.2f}, "
+                                    f"multiplier={intel_multiplier:.2f})"
                                 )
-                                # ADX regime can override MarketAnalysisAgent's simplistic regime
-                                # ADX is more nuanced — trust it over the simple price-based check
-                                if adx_rec == "HALT_TRADING":
-                                    market_regime = "bearish"
-                                elif adx_regime == "RANGING_HIGH_VOL":
-                                    # High vol ranging — downgrade from bullish to neutral
-                                    if market_regime == "bullish":
-                                        market_regime = "neutral"
-                                    # Upgrade from bearish to neutral — ADX says ranging, not trending down
-                                    elif market_regime == "bearish":
-                                        market_regime = "neutral"
-                                        self.logger.info(
-                                            f"[INTELLIGENCE] ADX override: {pair} bearish→neutral "
-                                            f"(ADX says RANGING_HIGH_VOL, not trending down)"
-                                        )
-                                elif adx_regime in ("RANGING_LOW_VOL", "UNKNOWN") and market_regime == "bearish":
-                                    # Low-vol ranging or unknown ADX — also upgrade bearish to neutral
+                            elif intel_action == "EXIT_ALL":
+                                pair_analysis_from_market["signal_strength"] = 0.0
+                                pair_analysis_from_market["intelligence_boost"] = {
+                                    "base_strength": base_strength,
+                                    "boost": -base_strength,
+                                    "intel_action": intel_action,
+                                    "intel_confidence": intel_confidence,
+                                    "intel_multiplier": 0.0,
+                                }
+                                self.logger.warning(
+                                    f"[INTELLIGENCE] {pair} signal_strength killed: "
+                                    f"EXIT_ALL from intelligence"
+                                )
+                            pair_analysis_from_market["intelligence"] = {
+                                "action": intel_action,
+                                "confidence": intel_confidence,
+                                "position_multiplier": intel_multiplier,
+                                "reasoning": intel_analysis.get("reasoning", ""),
+                            }
+
+                        intel = {
+                            "pair": pair,
+                            "regime": regime_result,
+                            "whale": whale_result,
+                        }
+                        cycle_results["intelligence_result"] = intel
+
+                        # ADX-based regime can override the simplistic MarketAnalysisAgent regime
+                        if regime_result and regime_result.get("regime") != "UNKNOWN":
+                            adx_regime = regime_result["regime"]
+                            adx_rec = regime_result.get("recommendation", "")
+                            self.logger.info(
+                                f"[INTELLIGENCE] ADX regime for {pair}: {adx_regime} "
+                                f"(ADX: {regime_result.get('adx', 0):.1f}, "
+                                f"ATR: {regime_result.get('atr_pct', 0):.2f}%, "
+                                f"rec: {adx_rec})"
+                            )
+                            # ADX regime can override MarketAnalysisAgent's simplistic regime
+                            # ADX is more nuanced — trust it over the simple price-based check
+                            if adx_rec == "HALT_TRADING":
+                                market_regime = "bearish"
+                            elif adx_regime == "RANGING_HIGH_VOL":
+                                # High vol ranging — downgrade from bullish to neutral
+                                if market_regime == "bullish":
+                                    market_regime = "neutral"
+                                # Upgrade from bearish to neutral — ADX says ranging, not trending down
+                                elif market_regime == "bearish":
                                     market_regime = "neutral"
                                     self.logger.info(
                                         f"[INTELLIGENCE] ADX override: {pair} bearish→neutral "
-                                        f"(ADX says {adx_regime}, not confirming downtrend)"
+                                        f"(ADX says RANGING_HIGH_VOL, not trending down)"
                                     )
-
-                            if whale_result:
+                            elif adx_regime in ("RANGING_LOW_VOL", "UNKNOWN") and market_regime == "bearish":
+                                # Low-vol ranging or unknown ADX — also upgrade bearish to neutral
+                                market_regime = "neutral"
                                 self.logger.info(
-                                    f"[INTELLIGENCE] Whale signal for {pair}: "
-                                    f"{whale_result.get('signal', 'NEUTRAL')} "
-                                    f"(CVD: {whale_result.get('cvd_ratio', 0.5):.1%})"
+                                    f"[INTELLIGENCE] ADX override: {pair} bearish→neutral "
+                                    f"(ADX says {adx_regime}, not confirming downtrend)"
                                 )
-                        else:
-                            self.logger.debug(
-                                f"[INTELLIGENCE] No OHLCV data for {pair}, "
-                                f"using MarketAnalysisAgent regime only"
+
+                        if whale_result:
+                            self.logger.info(
+                                f"[INTELLIGENCE] Whale signal for {pair}: "
+                                f"{whale_result.get('signal', 'NEUTRAL')} "
+                                f"(CVD: {whale_result.get('cvd_ratio', 0.5):.1%})"
                             )
+                    else:
+                        self.logger.debug(
+                            f"[INTELLIGENCE] No OHLCV data for {pair}, "
+                            f"using MarketAnalysisAgent regime only"
+                        )
                 except Exception as e:
                     self.logger.warning(f"[INTELLIGENCE] Klines analysis failed (non-fatal): {e}")
 

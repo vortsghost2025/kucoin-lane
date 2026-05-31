@@ -133,7 +133,7 @@ class BacktestingAgent(BaseAgent):
         historical_result = self.historical_backtester.backtest_pair(
             pair, analysis, self._klines_fetcher, self._exchange_adapter
         )
-        if historical_result is not None:
+        if historical_result is not None and historical_result.get("signal_valid", True) and historical_result.get("win_rate", 0.5) > 0:
             win_rate = historical_result.get("win_rate", 0.5)
             max_drawdown = historical_result.get("max_drawdown", 0.08)
             signal_valid = historical_result.get("signal_valid", True)
@@ -226,10 +226,10 @@ class BacktestingAgent(BaseAgent):
     def _calculate_sell_signal_win_rate(
         self, signal_strength: float, pair: str = ""
     ) -> float:
-        base_rate = 0.48
-        strength_boost = signal_strength * 0.12
+        base_rate = 0.50
+        strength_boost = signal_strength * 0.15
         win_rate = base_rate + strength_boost
-        win_rate = min(win_rate, 0.65)
+        win_rate = min(win_rate, 0.75)
 
         asset_factor = {
             **self.asset_factor_default,

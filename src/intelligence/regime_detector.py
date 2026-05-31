@@ -104,7 +104,7 @@ class RegimeDetector:
                 confidence = min(adx / 40, 1.0)
             elif is_trending and direction == "BEARISH":
                 regime = "TRENDING_DOWN"
-                recommendation = "HALT_TRADING"
+                recommendation = "SHORT_TREND"
                 confidence = min(adx / 40, 1.0)
             elif not is_trending and is_high_vol:
                 regime = "RANGING_HIGH_VOL"
@@ -164,6 +164,8 @@ class RegimeDetector:
         elif rec == "USE_RSI":
             return 1.0
         elif rec == "USE_TREND":
+            return 0.8
+        elif rec == "SHORT_TREND":
             return 0.8
         else:
             return 0.5

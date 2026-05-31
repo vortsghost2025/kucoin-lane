@@ -168,8 +168,8 @@ class MarketAnalysisAgent(BaseAgent):
 
         asset_config = {**self.asset_config_default, **self.asset_configs.get(pair, {})}
 
-        buy_threshold = 65 + asset_config["signal_threshold_adj"]
-        sell_threshold = 35 - asset_config["signal_threshold_adj"]
+        buy_threshold = 58 + asset_config["signal_threshold_adj"]
+        sell_threshold = 42 - asset_config["signal_threshold_adj"]
 
         entry_timing_approved = True
         entry_timing_reason = "Not configured"
@@ -249,7 +249,7 @@ class MarketAnalysisAgent(BaseAgent):
         if volatility == "high":
             return MarketRegime.HIGH_VOLATILITY.value
 
-        if price_change > 2 and rsi > 50:
+        if price_change > 3 and rsi > 55:
             return MarketRegime.BULLISH.value
 
         return MarketRegime.SIDEWAYS.value

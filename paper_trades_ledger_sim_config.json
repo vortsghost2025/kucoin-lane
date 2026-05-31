@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-05-31T02:19:04.602976+00:00",
+  "pairs": [
+    "SOL/USDT",
+    "BTC/USDT",
+    "ETH/USDT"
+  ],
+  "starting_balance": 10000.0,
+  "final_balance": 10000.0,
+  "risk_per_trade": 0.01,
+  "bars_processed": 170,
+  "interval": "6hour",
+  "total_trades_opened": 0
+}

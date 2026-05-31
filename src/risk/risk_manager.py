@@ -42,7 +42,7 @@ class RiskManagementAgent(BaseAgent):
         self.account_balance = cfg.get("account_balance", 10000)
         self.risk_per_trade = cfg.get("risk_per_trade", 0.01)
         self.min_risk_reward_ratio = (
-            cfg.get("min_risk_reward_ratio", 1.5)
+            cfg.get("min_risk_reward_ratio", 1.2)
         )
 
         requested_max_daily_loss = (
@@ -343,13 +343,32 @@ class RiskManagementAgent(BaseAgent):
             adjusted_min_signal_strength = max(adjusted_min_signal_strength, 0.45)
 
         if current_regime == "sideways":
-            base_stop_loss_pct = 0.015
-            stop_loss_pct = base_stop_loss_pct * stop_loss_adjustment
+            stop_loss_pct = self.default_stop_loss_pct * stop_loss_adjustment
         else:
             stop_loss_pct = self.default_stop_loss_pct * stop_loss_adjustment
+            # ATR-based stop loss: use actual volatility from klines if available
+            # This prevents guaranteed stop-outs on volatile assets (SOL moves 5-8% daily)
+            atr_pct = pair_analysis.get("atr_pct", 0) if isinstance(pair_analysis, dict) else 0
+            if atr_pct > 0:
+                # ATR stop = 2x ATR (gives price room to breathe)
+                atr_stop_pct = atr_pct * 2.0 / 100
+                # Use the WIDER of default stop or ATR stop (never narrower than default)
+                if atr_stop_pct > stop_loss_pct:
+                    stop_loss_pct = atr_stop_pct
+                    self.logger.info(
+                        f"[ATR_STOP] {pair}: ATR-based stop {atr_stop_pct:.3%} wider than default {stop_loss_pct/stop_loss_adjustment if stop_loss_adjustment else stop_loss_pct:.3%}"
+                    )
+            # Cap stop loss at 5% to prevent catastrophic single-trade losses
+            stop_loss_pct = min(stop_loss_pct, 0.06)
 
-        stop_loss = current_price * (1 - stop_loss_pct)
-        risk_per_unit = current_price - stop_loss
+        recommendation = pair_analysis.get("recommendation", "HOLD") if isinstance(pair_analysis, dict) else "HOLD"
+        is_short = recommendation in ("SELL", "SHORT")
+        if is_short:
+            stop_loss = current_price * (1 + stop_loss_pct)
+            risk_per_unit = stop_loss - current_price
+        else:
+            stop_loss = current_price * (1 - stop_loss_pct)
+            risk_per_unit = current_price - stop_loss
 
         min_size_units = self.min_position_size_by_pair.get(
             pair, self.min_position_size_units
@@ -389,20 +408,19 @@ class RiskManagementAgent(BaseAgent):
                     actual_risk_amount = position_size * risk_per_unit
                 except Exception as kelly_err:
                     self.logger.warning(f"Kelly sizing failed, falling back to fixed: {kelly_err}")
-                    confidence_multiplier = signal_strength * backtest_win_rate
+                    confidence_multiplier = signal_strength * max(backtest_win_rate, 0.30)
                     actual_risk_amount = max_risk_amount * confidence_multiplier
                     if risk_per_unit > 0:
                         position_size = actual_risk_amount / risk_per_unit
                     else:
                         position_size = 0
             else:
-                confidence_multiplier = signal_strength * backtest_win_rate
+                confidence_multiplier = signal_strength * max(backtest_win_rate, 0.30)
                 actual_risk_amount = max_risk_amount * confidence_multiplier
-
-            if risk_per_unit > 0:
-                position_size = actual_risk_amount / risk_per_unit
-            else:
-                position_size = 0
+                if risk_per_unit > 0:
+                    position_size = actual_risk_amount / risk_per_unit
+                else:
+                    position_size = 0
 
             if position_size_multiplier != 1.0:
                 position_size = position_size * position_size_multiplier
@@ -457,7 +475,10 @@ class RiskManagementAgent(BaseAgent):
             }
 
         take_profit_pct = stop_loss_pct * self.min_risk_reward_ratio
-        take_profit = current_price * (1 + take_profit_pct)
+        if is_short:
+            take_profit = current_price * (1 - take_profit_pct)
+        else:
+            take_profit = current_price * (1 + take_profit_pct)
 
         if position_size_usd < self.min_notional_usd:
             return {

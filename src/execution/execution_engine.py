@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..base_agent import BaseAgent, AgentStatus
+from ..trading.paper_trade_ledger import PaperTradeLedger
 from ..config import (
     KUCOIN_API_KEY,
     KUCOIN_API_SECRET,
@@ -430,6 +431,12 @@ class DryRunExecutor(ExecutionEngine):
         self.max_trades_per_session = config.get("max_trades_per_session", 2)
         self.load_backtest_data()
 
+        # Paper trade ledger — persistent tracking across restarts
+        self.ledger = PaperTradeLedger(
+            filepath=config.get("paper_ledger_path", "paper_trades_ledger.json")
+        )
+        self.log("info", f"Paper trade ledger initialized ({len(self.ledger.get_closed_trades())} historical trades)")
+
         self.orchestrator = None
         if config.get("paper_live", True):
             try:
@@ -500,6 +507,26 @@ class DryRunExecutor(ExecutionEngine):
                         self.log("info", f"Paper trade executed: {data.get('execution', {})}")
                     else:
                         self.log("info", f"No trade this cycle: {reason}")
+
+                # Monitor open ledger positions against current market prices
+                try:
+                    # Get current prices from the data fetching phase
+                    data_result = self.orchestrator.workflow_trace[0] if self.orchestrator.workflow_trace else {}
+                    if isinstance(data_result, dict):
+                        market_data = data_result.get("data", {}).get("market_data", {})
+                        current_prices = {}
+                        for pair, info in market_data.items():
+                            if isinstance(info, dict):
+                                price = info.get("current_price", 0)
+                                if price > 0:
+                                    current_prices[pair] = price
+                        if current_prices:
+                            closed = self.ledger.monitor_open_positions(current_prices)
+                            for ct in closed:
+                                self.log("info", f"[LEDGER] Auto-closed: #{ct['trade_id']} {ct['pair']} ${ct['net_pnl_usd']:+.4f} ({ct['exit_reason']})")
+                except Exception as ledger_err:
+                    self.log("warning", f"Ledger monitoring failed (non-fatal): {ledger_err}")
+
             except Exception as e:
                 self.log("error", f"Orchestrator cycle error: {e}")
         else:
@@ -557,6 +584,32 @@ class DryRunExecutor(ExecutionEngine):
             f"{pair} @ {entry_price:.4f} | Size: {position_size:.4f} | "
             f"SL: {stop_loss:.4f} | TP: {take_profit:.4f}",
         )
+
+        # Record in persistent ledger
+        try:
+            # Extract signal context from orchestrator's most recent analysis
+            pair_analysis = {}
+            if self.orchestrator and self.orchestrator.workflow_trace:
+                for trace in self.orchestrator.workflow_trace:
+                    if isinstance(trace, dict) and trace.get("action") == "analyze_market":
+                        pair_analysis = trace.get("data", {}).get("analysis", {}).get(pair, {})
+                        break
+            self.ledger.open_trade(
+                pair=pair,
+                direction="long",
+                entry_price=entry_price,
+                position_size=position_size,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                signal_strength=pair_analysis.get("signal_strength", 0),
+                regime=pair_analysis.get("regime", ""),
+                intelligence_confidence=pair_analysis.get("intelligence", {}).get("confidence", 0),
+                intelligence_action=pair_analysis.get("intelligence", {}).get("action", ""),
+                backtest_win_rate=0.0,  # Filled from backtest trace if available
+                metadata={"source": "dry_run_cycle"},
+            )
+        except Exception as ledger_err:
+            self.log("warning", f"Ledger recording failed (non-fatal): {ledger_err}")
 
         return {
             "agent": "DryRunExecutor",
