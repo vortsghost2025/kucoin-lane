@@ -138,7 +138,7 @@ ASSET_PROFILES = _load_asset_profiles()
 TRADING_CONFIG = {
     "account_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
     "paper_trading": os.getenv("PAPER_TRADING", "true").lower() == "true",
-    "trading_pairs": os.getenv("TRADING_PAIRS", "SOL/USDT,BTC/USDT,ETH/USDT").split(
+    "trading_pairs": os.getenv("TRADING_PAIRS", "BTC/USDT,ETH/USDT").split(
         ","
     ),
 }

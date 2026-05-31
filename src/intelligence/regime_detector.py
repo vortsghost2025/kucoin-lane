@@ -36,7 +36,7 @@ class RegimeDetector:
         adx_period: int = 14,
         atr_period: int = 14,
         adx_trend_threshold: int = 25,
-        atr_high_threshold: float = 0.03,
+        atr_high_threshold: float = 0.04,
     ):
         self.adx_period = adx_period
         self.atr_period = atr_period

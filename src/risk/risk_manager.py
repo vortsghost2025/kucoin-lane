@@ -17,6 +17,7 @@ DEFAULT_ASSET_CONFIG = {
     "min_signal_strength_adjustment": 0.0,
     "stop_loss_adjustment": 1.0,
     "position_size_multiplier": 1.0,
+    "max_stop_loss_pct": 0.06,
 }
 
 
@@ -358,8 +359,9 @@ class RiskManagementAgent(BaseAgent):
                     self.logger.info(
                         f"[ATR_STOP] {pair}: ATR-based stop {atr_stop_pct:.3%} wider than default {stop_loss_pct/stop_loss_adjustment if stop_loss_adjustment else stop_loss_pct:.3%}"
                     )
-            # Cap stop loss at 5% to prevent catastrophic single-trade losses
-            stop_loss_pct = min(stop_loss_pct, 0.06)
+        # Cap stop loss per pair — volatile assets (SOL) need wider stops
+        max_stop_pct = asset_config.get("max_stop_loss_pct", 0.06)
+        stop_loss_pct = min(stop_loss_pct, max_stop_pct)
 
         recommendation = pair_analysis.get("recommendation", "HOLD") if isinstance(pair_analysis, dict) else "HOLD"
         is_short = recommendation in ("SELL", "SHORT")

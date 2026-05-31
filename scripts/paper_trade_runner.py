@@ -49,8 +49,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Paper Trade Runner — Rapid simulation with live klines")
     parser.add_argument(
         "--pairs",
-        default="SOL/USDT,BTC/USDT,ETH/USDT",
-        help="Comma-separated trading pairs (default: SOL/USDT,BTC/USDT,ETH/USDT)",
+        default="BTC/USDT,ETH/USDT",
+        help="Comma-separated trading pairs (default: BTC/USDT,ETH/USDT)",
     )
     parser.add_argument(
         "--balance",

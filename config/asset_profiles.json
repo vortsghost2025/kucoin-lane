@@ -3,13 +3,15 @@
     "default": {
       "min_signal_strength_adjustment": 0.0,
       "stop_loss_adjustment": 1.0,
-      "position_size_multiplier": 1.0
+      "position_size_multiplier": 1.0,
+      "max_stop_loss_pct": 0.06
     },
     "pairs": {
       "SOL/USDT": {
-        "min_signal_strength_adjustment": 0.0,
-        "stop_loss_adjustment": 1.0,
-        "position_size_multiplier": 1.0
+        "min_signal_strength_adjustment": 0.08,
+        "stop_loss_adjustment": 1.5,
+        "position_size_multiplier": 0.70,
+        "max_stop_loss_pct": 0.10
       },
       "BTC/USDT": {
         "min_signal_strength_adjustment": 0.05,
@@ -32,10 +34,10 @@
     },
     "pairs": {
       "SOL/USDT": {
-        "rsi_weight": 0.8,
-        "momentum_weight": 1.0,
-        "volatility_adjustment": 0.1,
-        "signal_threshold_adj": 0
+        "rsi_weight": 0.6,
+        "momentum_weight": 0.8,
+        "volatility_adjustment": 0.15,
+        "signal_threshold_adj": 8
       },
       "BTC/USDT": {
         "rsi_weight": 0.6,
@@ -58,8 +60,8 @@
     },
     "pairs": {
       "SOL/USDT": {
-        "win_rate_multiplier": 1.0,
-        "max_drawdown_adjustment": 1.0
+        "win_rate_multiplier": 0.85,
+        "max_drawdown_adjustment": 1.20
       },
       "BTC/USDT": {
         "win_rate_multiplier": 0.87,
