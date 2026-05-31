@@ -450,6 +450,7 @@ class DryRunExecutor(ExecutionEngine):
                 orch_config = dict(config)
                 orch_config["paper_trading"] = True
                 orch_config["paper_live"] = False
+                orch_config.setdefault("timeframe", os.getenv("CANDLE_INTERVAL", "1hour"))
                 self.orchestrator = IntelligenceOrchestrator(orch_config)
                 self.orchestrator.register_agent(DataFetchingAgent(orch_config))
                 self.orchestrator.register_agent(MarketAnalysisAgent(orch_config))
@@ -733,7 +734,8 @@ class LiveExecutor(ExecutionEngine):
         try:
             account_balance = self.adapter.get_balance()
             if account_balance is not None:
-                self.log("info", f"Account balance: ${account_balance:.2f} USDT")
+                usdt_balance = account_balance.get("USDT", 0.0)
+                self.log("info", f"Account balance: ${usdt_balance:.2f} USDT")
         except Exception as e:
             self.log("warning", f"Could not fetch balance: {e}")
 
@@ -968,12 +970,14 @@ class LiveExecutor(ExecutionEngine):
                 "info", "Checking for existing positions and unexpected balances..."
             )
             account_balance = self.adapter.get_balance()
-            if account_balance is not None and account_balance > 0:
-                msg = (
-                    f"<b>ALERT: Existing Account Balance Detected</b>\n"
-                    f"Balance: ${account_balance:.2f} USDT\n"
-                    f"Bot will manage this balance."
-                )
+            if account_balance is not None:
+                usdt_balance = account_balance.get("USDT", 0.0)
+                if usdt_balance > 0:
+                    msg = (
+                        f"<b>ALERT: Existing Account Balance Detected</b>\n"
+                        f"Balance: ${usdt_balance:.2f} USDT\n"
+                        f"Bot will manage this balance."
+                    )
                 send_telegram_notification(msg)
             else:
                 self.log("info", "No unexpected positions - account clean")

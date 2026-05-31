@@ -389,8 +389,14 @@ class TestSelectExecutor:
         assert isinstance(executor, DryRunExecutor)
 
     def test_select_live_trading(self):
-        with pytest.raises(Exception):
-            select_executor(dry_run=False, live_trading=True)
+        mock_adapter = MagicMock()
+        mock_adapter.authenticated = False
+        with patch("src.execution.execution_engine.KuCoinAdapter", return_value=mock_adapter):
+            executor = select_executor(dry_run=False, live_trading=True)
+        assert executor is not None
+        assert isinstance(executor, LiveExecutor)
+        assert executor.adapter is not None
+        assert executor.adapter.authenticated is False
 
     def test_select_neither_raises(self):
         with pytest.raises(RuntimeError):

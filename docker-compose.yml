@@ -14,6 +14,7 @@ services:
       KUCOIN_USE_SANDBOX: ${KUCOIN_USE_SANDBOX:-false}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+  MIN_NOTIONAL_USD: "10.0"
     dns:
       - 1.1.1.1
       - 8.8.8.8

@@ -150,7 +150,7 @@ RISK_CONFIG = {
     "account_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
     "min_signal_strength": float(os.getenv("MIN_SIGNAL_STRENGTH", "0.25")),
     "min_win_rate": float(os.getenv("MIN_WIN_RATE", "0.45")),
-    "min_notional_usd": float(os.getenv("MIN_NOTIONAL_USD", "1.0")),
+    "min_notional_usd": float(os.getenv("MIN_NOTIONAL_USD", "10.0")),
     "default_stop_loss_pct": float(os.getenv("DEFAULT_STOP_LOSS_PCT", "0.02")),
     "enforce_min_position_size_only": os.getenv(
         "ENFORCE_MIN_POSITION_SIZE_ONLY", "false"

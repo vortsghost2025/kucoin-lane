@@ -139,13 +139,21 @@ class TestRiskManagerKellyPaths:
             "min_notional_usd": 0.50,
             "min_position_size_units": 0.01,
             "enforce_min_position_size_only": False,
-            "kelly": {
-                "min_position_pct": 0.01,
-                "max_position_pct": 0.25,
-                "min_trades_for_kelly": 20,
-                "default_position_pct": 0.10,
-            },
-        }
+        "kelly": {
+            "min_position_pct": 0.01,
+            "max_position_pct": 0.25,
+            "min_trades_for_kelly": 20,
+            "default_position_pct": 0.10,
+        },
+        "asset_config_default": {
+            "stop_loss_adjustment": 1.0,
+            "position_size_multiplier": 1.0,
+            "max_stop_loss_pct": 0.10,
+        },
+        "asset_configs": {
+            "SOL/USDT": {"stop_loss_adjustment": 1.0, "position_size_multiplier": 1.0},
+        },
+    }
 
     def _make_input(self, signal_strength=0.8, win_rate=0.6):
         return {

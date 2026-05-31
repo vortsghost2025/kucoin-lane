@@ -64,7 +64,7 @@ class TestMarketAnalysisAgent:
 
     def test_classify_regime(self, agent):
         assert agent._classify_regime(-10, 20, "low") == MarketRegime.BEARISH.value
-        assert agent._classify_regime(5, 55, "low") == MarketRegime.BULLISH.value
+        assert agent._classify_regime(5, 56, "low") == MarketRegime.BULLISH.value
         assert agent._classify_regime(0, 50, "low") == MarketRegime.SIDEWAYS.value
 
     def test_generate_signal(self, agent):

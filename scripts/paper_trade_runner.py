@@ -218,22 +218,25 @@ def run_simulation(args):
     whale_watch = WhaleWatch()
     market_analyzer = MarketAnalysisAgent(config={
         "account_balance": args.balance,
+        "timeframe": args.interval,
     })
     backtester = BacktestingAgent(config={
         "account_balance": args.balance,
         "min_win_rate": args.min_win_rate,
+        "timeframe": args.interval,
     })
     backtester.set_klines_infrastructure(klines_fetcher, adapter)
 
     risk_manager = RiskManagementAgent(config={
         "account_balance": args.balance,
         "risk_per_trade": args.risk_pct,
+        "timeframe": args.interval,
         "min_signal_strength": args.min_signal,
         "min_win_rate": args.min_win_rate,
         "default_stop_loss_pct": args.stop_loss_pct,
         "min_risk_reward_ratio": args.take_profit_ratio,
         "enforce_min_position_size_only": False,
-        "min_notional_usd": 1.0,
+        "min_notional_usd": 10.0,
     })
 
     min_bars = min(len(df) for df in klines_data.values()) if klines_data else 0
@@ -281,7 +284,9 @@ def run_simulation(args):
             bar = df.iloc[bar_idx]
             current_price = float(bar["close"])
 
-            lookback = min(24, bar_idx)
+            # Bars per day varies by interval — use correct lookback for true 24h comparison
+            bars_per_day = {"1min": 1440, "5min": 288, "15min": 96, "30min": 48, "1hour": 24, "6hour": 4, "1day": 1}
+            lookback = min(bars_per_day.get(args.interval, 24), bar_idx)
             price_24h_ago = float(df.iloc[bar_idx - lookback]["close"])
             price_change_24h_pct = ((current_price - price_24h_ago) / price_24h_ago) * 100
 
@@ -290,7 +295,7 @@ def run_simulation(args):
                 prev_close = float(df.iloc[bar_idx - 1]["close"])
                 price_change_1bar_pct = ((current_price - prev_close) / prev_close) * 100
 
-            vol_lookback = min(24, bar_idx + 1)
+            vol_lookback = min(bars_per_day.get(args.interval, 24), bar_idx + 1)
             volume_24h = float(df.iloc[bar_idx - vol_lookback + 1:bar_idx + 1]["volume"].sum())
 
             market_data = {

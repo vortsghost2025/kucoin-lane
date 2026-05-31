@@ -147,6 +147,9 @@ class IntelligenceOrchestrator(BaseAgent):
         self._cycle_count = 0
         self._account_balance = config.get("account_balance", DEFAULT_ACCOUNT_BALANCE)
         self._start_time = time.time()
+        self._live_trading = os.getenv("LIVE_TRADING", "false").lower() == "true"
+        self._balance_cache = None
+        self._balance_cache_ts = 0.0
         self.portfolio_cb = PortfolioCircuitBreaker(
             starting_equity=self._account_balance,
             state_path=os.getenv("PORTFOLIO_CB_STATE_PATH", "portfolio_cb_state.json"),
@@ -167,6 +170,14 @@ class IntelligenceOrchestrator(BaseAgent):
         # Klines/OHLCV fetcher for RegimeDetector + WhaleWatch
         self._klines_fetcher: Optional[KuCoinKlinesFetcher] = None
         self._exchange_adapter = None  # set via set_exchange_adapter()
+
+        # Timeframe used for per-timeframe asset profile overrides (e.g. RSI/ATR thresholds
+        # that differ between 5min, 1hour, 1day). Sourced from CANDLE_INTERVAL env var so the
+        # main bot loop activates timeframe_overrides — previously only paper_trade_runner.py
+        # passed this key, leaving the production orchestration path with timeframe=None.
+        self.timeframe = config.get("timeframe") or os.getenv("CANDLE_INTERVAL", "1hour")
+        if "timeframe" not in config:
+            config["timeframe"] = self.timeframe
 
         self.consecutive_notional_rejections = 0
         self.notional_rejection_threshold = config.get(
@@ -379,7 +390,54 @@ class IntelligenceOrchestrator(BaseAgent):
         risk_agent = self.agent_registry.get("RiskManagementAgent")
         if risk_agent and hasattr(risk_agent, "update_account_balance"):
             risk_agent.update_account_balance(self._account_balance)
-            self.logger.info(f"Account balance updated from execution: {new_balance}")
+        self.logger.info(f"Account balance updated from execution: {new_balance}")
+
+    def _fetch_real_balance(self) -> Optional[float]:
+        """Fetch real USDT balance from exchange. In live mode, updates risk
+        calculations. In paper-live mode, logs real balance for transparency
+        but keeps paper balance. Cached with 300s TTL to avoid excessive API calls."""
+        import time
+        now = time.time()
+        if self._balance_cache is not None and (now - self._balance_cache_ts) < 300:
+            return self._balance_cache
+        try:
+            exec_agent = self.agent_registry.get("ExecutionAgent")
+            adapter = None
+            if exec_agent and hasattr(exec_agent, 'engine') and hasattr(exec_agent.engine, 'adapter'):
+                adapter = exec_agent.engine.adapter
+            if adapter is None:
+                return self._balance_cache
+            balance_dict = adapter.get_balance()
+            if balance_dict is None:
+                return self._balance_cache
+            real_usdt = balance_dict.get("USDT", 0.0)
+            self._balance_cache = real_usdt
+            self._balance_cache_ts = now
+            if self._live_trading:
+                if abs(real_usdt - self._account_balance) > 0.01:
+                    self.logger.info(
+                        f"Live mode: updating balance from ${self._account_balance:.2f} "
+                        f"to real exchange balance ${real_usdt:.2f} USDT"
+                    )
+                    self._account_balance = real_usdt
+                    risk_agent = self.agent_registry.get("RiskManagementAgent")
+                    if risk_agent and hasattr(risk_agent, "update_account_balance"):
+                        risk_agent.update_account_balance(real_usdt)
+            else:
+                self.logger.info(
+                    f"Paper-live mode: real exchange balance ${real_usdt:.4f} USDT, "
+                    f"paper balance ${self._account_balance:.2f} USDT"
+                )
+                if real_usdt < 10.0 and self._account_balance > 10.0:
+                    self.logger.warning(
+                        f"Real balance (${real_usdt:.4f}) is below minimum notional. "
+                        f"Paper trading continues with simulated balance. "
+                        f"Deposit USDT before enabling LIVE_TRADING=true."
+                    )
+            return real_usdt
+        except Exception as e:
+            self.logger.warning(f"Could not fetch real balance: {e}")
+            return self._balance_cache
 
     def _validate_agent_output(
         self,
@@ -686,6 +744,10 @@ class IntelligenceOrchestrator(BaseAgent):
 
         try:
             self._reset_daily_risk_if_needed()
+
+            # Fetch real exchange balance: updates risk in live mode,
+            # logs for transparency in paper-live mode
+            self._fetch_real_balance()
 
             allowed, reason = self.is_trading_allowed()
             if not allowed:

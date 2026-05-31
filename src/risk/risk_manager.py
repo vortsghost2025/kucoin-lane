@@ -73,6 +73,7 @@ class RiskManagementAgent(BaseAgent):
         )
 
         self.cumulative_risk_today = 0.0
+        self.timeframe = cfg.get("timeframe", None)
 
         global_asset_default = GLOBAL_RISK_CONFIG.get("asset_config_default", {})
         config_asset_default = cfg.get("asset_config_default", {})
@@ -332,6 +333,12 @@ class RiskManagementAgent(BaseAgent):
             **self.asset_config_default,
             **self.asset_configs.get(pair, {}),
         }
+
+        if self.timeframe:
+            tf_overrides = self.asset_configs.get(pair, {}).get("timeframe_overrides", {})
+            if isinstance(tf_overrides, dict) and self.timeframe in tf_overrides and isinstance(tf_overrides[self.timeframe], dict):
+                asset_config = {**asset_config, **tf_overrides[self.timeframe]}
+
         stop_loss_adjustment = asset_config["stop_loss_adjustment"]
         position_size_multiplier = asset_config["position_size_multiplier"]
         min_signal_strength_adjustment = asset_config["min_signal_strength_adjustment"]

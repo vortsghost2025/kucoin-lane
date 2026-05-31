@@ -51,6 +51,7 @@ class MarketAnalysisAgent(BaseAgent):
         self.macd_slow = cfg.get("macd_slow", 26)
         self.macd_signal = cfg.get("macd_signal", 9)
         self.downtrend_threshold = cfg.get("downtrend_threshold", -5)
+        self.timeframe = cfg.get("timeframe", None)
 
         global_asset_default = GLOBAL_MARKET_CONFIG.get("asset_config_default", {})
         config_asset_default = cfg.get("asset_config_default", {})
@@ -168,6 +169,11 @@ class MarketAnalysisAgent(BaseAgent):
 
         asset_config = {**self.asset_config_default, **self.asset_configs.get(pair, {})}
 
+        if self.timeframe:
+            tf_overrides = self.asset_configs.get(pair, {}).get("timeframe_overrides", {})
+            if isinstance(tf_overrides, dict) and self.timeframe in tf_overrides and isinstance(tf_overrides[self.timeframe], dict):
+                asset_config = {**asset_config, **tf_overrides[self.timeframe]}
+
         buy_threshold = 58 + asset_config["signal_threshold_adj"]
         sell_threshold = 42 - asset_config["signal_threshold_adj"]
 
@@ -258,6 +264,12 @@ class MarketAnalysisAgent(BaseAgent):
         self, price_change: float, rsi: float, pair: str = ""
     ) -> float:
         asset_config = {**self.asset_config_default, **self.asset_configs.get(pair, {})}
+
+        if self.timeframe:
+            tf_overrides = self.asset_configs.get(pair, {}).get("timeframe_overrides", {})
+            if isinstance(tf_overrides, dict) and self.timeframe in tf_overrides and isinstance(tf_overrides[self.timeframe], dict):
+                asset_config = {**asset_config, **tf_overrides[self.timeframe]}
+
         rsi_weight = asset_config["rsi_weight"]
         momentum_weight = asset_config["momentum_weight"]
 
