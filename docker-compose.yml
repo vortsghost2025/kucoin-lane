@@ -5,15 +5,15 @@ services:
       dockerfile: Dockerfile
     container_name: kucoin-lane
     restart: unless-stopped
-  env_file:
-    - ./config/.env
-    - ~/.config/kucoin-lane/credentials.env
-  environment:
-    - EXECUTION_MODE=${EXECUTION_MODE:-dry_run}
-    - CYCLE_INTERVAL=${CYCLE_INTERVAL:-60}
-    - KUCOIN_USE_SANDBOX=${KUCOIN_USE_SANDBOX:-false}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID:-}
+    env_file:
+      - ./config/.env
+      - /home/we4free/.config/kucoin-lane/credentials.env
+    environment:
+      EXECUTION_MODE: ${EXECUTION_MODE:-dry_run}
+      CYCLE_INTERVAL: ${CYCLE_INTERVAL:-60}
+      KUCOIN_USE_SANDBOX: ${KUCOIN_USE_SANDBOX:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
     dns:
       - 1.1.1.1
       - 8.8.8.8
