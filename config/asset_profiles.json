@@ -20,7 +20,7 @@
       },
       "ETH/USDT": {
         "min_signal_strength_adjustment": 0.03,
-        "stop_loss_adjustment": 0.97,
+        "stop_loss_adjustment": 1.20,
         "position_size_multiplier": 0.9
       }
     }
@@ -46,10 +46,10 @@
         "signal_threshold_adj": 5
       },
       "ETH/USDT": {
-        "rsi_weight": 0.7,
-        "momentum_weight": 1.1,
-        "volatility_adjustment": 0.07,
-        "signal_threshold_adj": 3
+        "rsi_weight": 0.6,
+        "momentum_weight": 1.2,
+        "volatility_adjustment": 0.10,
+        "signal_threshold_adj": 6
       }
     }
   },
@@ -68,8 +68,8 @@
         "max_drawdown_adjustment": 1.15
       },
       "ETH/USDT": {
-        "win_rate_multiplier": 0.9,
-        "max_drawdown_adjustment": 1.1
+        "win_rate_multiplier": 0.87,
+        "max_drawdown_adjustment": 1.15
       }
     }
   }
