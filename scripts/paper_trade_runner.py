@@ -188,7 +188,7 @@ def run_simulation(args):
     logger.info(f"  Min signal: {args.min_signal}")
     logger.info(f"  Min win rate: {args.min_win_rate:.1%}")
 
-    ledger = PaperTradeLedger(filepath=args.ledger)
+    ledger = PaperTradeLedger(filepath=args.ledger, initial_balance=args.balance)
     if args.reset:
         ledger.reset()
         logger.info("Ledger reset — starting fresh")

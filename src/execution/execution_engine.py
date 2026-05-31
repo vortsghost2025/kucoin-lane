@@ -433,7 +433,8 @@ class DryRunExecutor(ExecutionEngine):
 
         # Paper trade ledger — persistent tracking across restarts
         self.ledger = PaperTradeLedger(
-            filepath=config.get("paper_ledger_path", "paper_trades_ledger.json")
+            filepath=config.get("paper_ledger_path", "paper_trades_ledger.json"),
+            initial_balance=float(config.get("account_balance", 10000)),
         )
         self.log("info", f"Paper trade ledger initialized ({len(self.ledger.get_closed_trades())} historical trades)")
 
@@ -587,16 +588,17 @@ class DryRunExecutor(ExecutionEngine):
 
         # Record in persistent ledger
         try:
-            # Extract signal context from orchestrator's most recent analysis
-            pair_analysis = {}
-            if self.orchestrator and self.orchestrator.workflow_trace:
-                for trace in self.orchestrator.workflow_trace:
-                    if isinstance(trace, dict) and trace.get("action") == "analyze_market":
-                        pair_analysis = trace.get("data", {}).get("analysis", {}).get(pair, {})
-                        break
+            analysis_data = input_data.get("analysis", {})
+            backtest_results = input_data.get("backtest_results", {})
+            pair_analysis = analysis_data.get(pair, {})
+            recommendation = pair_analysis.get("recommendation", "HOLD")
+            direction = "short" if recommendation in ("SELL", "SHORT") else "long"
+            pair_backtest = backtest_results.get(pair, {})
+            backtest_win_rate = pair_backtest.get("win_rate", 0.0)
+            backtest_data_source = pair_backtest.get("data_source", "")
             self.ledger.open_trade(
                 pair=pair,
-                direction="long",
+                direction=direction,
                 entry_price=entry_price,
                 position_size=position_size,
                 stop_loss=stop_loss,
@@ -605,8 +607,9 @@ class DryRunExecutor(ExecutionEngine):
                 regime=pair_analysis.get("regime", ""),
                 intelligence_confidence=pair_analysis.get("intelligence", {}).get("confidence", 0),
                 intelligence_action=pair_analysis.get("intelligence", {}).get("action", ""),
-                backtest_win_rate=0.0,  # Filled from backtest trace if available
-                metadata={"source": "dry_run_cycle"},
+                backtest_win_rate=backtest_win_rate,
+                backtest_data_source=backtest_data_source,
+                metadata={"source": "dry_run_cycle", "recommendation": recommendation},
             )
         except Exception as ledger_err:
             self.log("warning", f"Ledger recording failed (non-fatal): {ledger_err}")

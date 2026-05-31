@@ -38,8 +38,9 @@ logger = logging.getLogger(__name__)
 class PaperTradeLedger:
     """Persistent paper trade ledger with edge statistics."""
 
-    def __init__(self, filepath: str = "paper_trades_ledger.json"):
+    def __init__(self, filepath: str = "paper_trades_ledger.json", initial_balance: float = 10000.0):
         self.filepath = filepath
+        self.initial_balance = initial_balance
         self.trades: List[Dict[str, Any]] = []
         self._next_id: int = 1
         self._load()
@@ -297,18 +298,17 @@ class PaperTradeLedger:
             sum(t["net_pnl_usd"] for t in closed if t["net_pnl_usd"] <= 0)
         )
 
-        # Max drawdown from equity curve
-        equity = 0.0
-        peak = 0.0
+        # Max drawdown from equity curve (relative to account balance, not just P&L)
+        equity = self.initial_balance
+        peak = self.initial_balance
         max_dd = 0.0
         for pnl in net_pnls:
             equity += pnl
             if equity > peak:
                 peak = equity
-            if peak > 0:
-                dd = (peak - equity) / peak
-                if dd > max_dd:
-                    max_dd = dd
+            dd = (peak - equity) / peak
+            if dd > max_dd:
+                max_dd = dd
 
         # Sharpe approximation (annualized)
         import numpy as np

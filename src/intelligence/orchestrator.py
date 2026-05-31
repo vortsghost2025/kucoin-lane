@@ -1025,20 +1025,22 @@ class IntelligenceOrchestrator(BaseAgent):
                 )
             else:
                 self.transition_stage(WorkflowStage.EXECUTING)
-                exec_result = self._execute_agent_phase(
-                    "ExecutionAgent",
-                    "execute_trade",
-                    {
-                        "market_data": market_data,
-                        "position_size": risk_data.get("position_size"),
-                        "stop_loss": risk_data.get("stop_loss"),
-                        "take_profit": risk_data.get("take_profit"),
-                        "paper_trading": self.is_paper_trading,
-                        "account_balance": risk_data.get("account_balance"),
-                        "position_approved": risk_data.get("position_approved", False),
-                        "risk_approved": risk_data.get("position_approved", False),
-                    },
-                )
+            exec_result = self._execute_agent_phase(
+                "ExecutionAgent",
+                "execute_trade",
+                {
+                    "market_data": market_data,
+                    "position_size": risk_data.get("position_size"),
+                    "stop_loss": risk_data.get("stop_loss"),
+                    "take_profit": risk_data.get("take_profit"),
+                    "paper_trading": self.is_paper_trading,
+                    "account_balance": risk_data.get("account_balance"),
+                    "position_approved": risk_data.get("position_approved", False),
+                    "risk_approved": risk_data.get("position_approved", False),
+                    "analysis": analysis_data.get("analysis", {}),
+                    "backtest_results": backtest_data.get("backtest_results", {}),
+                },
+            )
             cycle_results["exec_result"] = exec_result
 
             if not self._validate_agent_output(
