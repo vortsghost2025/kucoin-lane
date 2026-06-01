@@ -44,6 +44,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger("paper_runner")
 
+BARS_PER_DAY = {
+    "1min": 1440,
+    "5min": 288,
+    "15min": 96,
+    "30min": 48,
+    "1hour": 24,
+    "6hour": 4,
+    "1day": 1,
+}
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Paper Trade Runner — Rapid simulation with live klines")
@@ -55,8 +65,8 @@ def parse_args():
     parser.add_argument(
         "--balance",
         type=float,
-        default=10000.0,
-        help="Simulated account balance in USDT (default: 10000)",
+        default=110.0,
+        help="Simulated account balance in USDT (default: 110)",
     )
     parser.add_argument(
         "--risk-pct",
@@ -214,7 +224,7 @@ def run_simulation(args):
         logger.error("No klines data fetched — cannot run simulation")
         return
 
-    regime_detector = RegimeDetector(adx_trend_threshold=20)
+    regime_detector = RegimeDetector(adx_trend_threshold=20, timeframe=args.interval)
     whale_watch = WhaleWatch()
     market_analyzer = MarketAnalysisAgent(config={
         "account_balance": args.balance,
@@ -285,8 +295,7 @@ def run_simulation(args):
             current_price = float(bar["close"])
 
             # Bars per day varies by interval — use correct lookback for true 24h comparison
-            bars_per_day = {"1min": 1440, "5min": 288, "15min": 96, "30min": 48, "1hour": 24, "6hour": 4, "1day": 1}
-            lookback = min(bars_per_day.get(args.interval, 24), bar_idx)
+            lookback = min(BARS_PER_DAY.get(args.interval, 24), bar_idx)
             price_24h_ago = float(df.iloc[bar_idx - lookback]["close"])
             price_change_24h_pct = ((current_price - price_24h_ago) / price_24h_ago) * 100
 
@@ -295,7 +304,7 @@ def run_simulation(args):
                 prev_close = float(df.iloc[bar_idx - 1]["close"])
                 price_change_1bar_pct = ((current_price - prev_close) / prev_close) * 100
 
-            vol_lookback = min(bars_per_day.get(args.interval, 24), bar_idx + 1)
+            vol_lookback = min(BARS_PER_DAY.get(args.interval, 24), bar_idx + 1)
             volume_24h = float(df.iloc[bar_idx - vol_lookback + 1:bar_idx + 1]["volume"].sum())
 
             market_data = {

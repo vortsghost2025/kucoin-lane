@@ -8,13 +8,10 @@ services:
     env_file:
       - ./config/.env
       - /home/we4free/.config/kucoin-lane/credentials.env
-    environment:
-      EXECUTION_MODE: ${EXECUTION_MODE:-dry_run}
-      CYCLE_INTERVAL: ${CYCLE_INTERVAL:-60}
-      KUCOIN_USE_SANDBOX: ${KUCOIN_USE_SANDBOX:-false}
-      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
-      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
-  MIN_NOTIONAL_USD: "10.0"
+  environment:
+    MIN_NOTIONAL_USD: "5.0"
+    ACCOUNT_BALANCE: "110.0"
+    MAX_POSITION_SIZE_USD: "55.0"
     dns:
       - 1.1.1.1
       - 8.8.8.8

@@ -28,6 +28,24 @@
             "position_size_multiplier": 0.9
           }
         }
+      },
+      "AVAX/USDT": {
+        "min_signal_strength_adjustment": 0.06,
+        "stop_loss_adjustment": 1.15,
+        "position_size_multiplier": 0.75,
+        "max_stop_loss_pct": 0.08
+      },
+      "DOGE/USDT": {
+        "min_signal_strength_adjustment": 0.10,
+        "stop_loss_adjustment": 1.30,
+        "position_size_multiplier": 0.60,
+        "max_stop_loss_pct": 0.10
+      },
+      "LINK/USDT": {
+        "min_signal_strength_adjustment": 0.05,
+        "stop_loss_adjustment": 1.10,
+        "position_size_multiplier": 0.80,
+        "max_stop_loss_pct": 0.07
       }
     }
   },
@@ -64,6 +82,24 @@
             "volatility_adjustment": 0.07
           }
         }
+      },
+      "AVAX/USDT": {
+        "rsi_weight": 0.65,
+        "momentum_weight": 1.0,
+        "volatility_adjustment": 0.12,
+        "signal_threshold_adj": 5
+      },
+      "DOGE/USDT": {
+        "rsi_weight": 0.55,
+        "momentum_weight": 0.9,
+        "volatility_adjustment": 0.18,
+        "signal_threshold_adj": 8
+      },
+      "LINK/USDT": {
+        "rsi_weight": 0.65,
+        "momentum_weight": 1.1,
+        "volatility_adjustment": 0.10,
+        "signal_threshold_adj": 4
       }
     }
   },
@@ -90,6 +126,18 @@
             "max_drawdown_adjustment": 1.10
           }
         }
+      },
+      "AVAX/USDT": {
+        "win_rate_multiplier": 0.85,
+        "max_drawdown_adjustment": 1.15
+      },
+      "DOGE/USDT": {
+        "win_rate_multiplier": 0.80,
+        "max_drawdown_adjustment": 1.25
+      },
+      "LINK/USDT": {
+        "win_rate_multiplier": 0.87,
+        "max_drawdown_adjustment": 1.15
       }
     }
   }

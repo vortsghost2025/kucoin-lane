@@ -7,14 +7,16 @@ class TestConfigModule:
         from src.config import TRADING_CONFIG
         assert "trading_pairs" in TRADING_CONFIG
         assert TRADING_CONFIG["paper_trading"] is True
-        assert TRADING_CONFIG["account_balance"] == 10000.0
+        assert TRADING_CONFIG["account_balance"] == 110.0
 
     def test_risk_config_defaults(self):
         from src.config import RISK_CONFIG
-        assert RISK_CONFIG["risk_per_trade"] == 0.005
-        assert RISK_CONFIG["min_risk_reward_ratio"] == 1.5
-        assert RISK_CONFIG["max_daily_loss"] == 0.05
+        assert RISK_CONFIG["risk_per_trade"] == 0.01
+        assert RISK_CONFIG["min_risk_reward_ratio"] == 1.2
+        assert RISK_CONFIG["max_daily_loss"] == 0.03
         assert RISK_CONFIG["default_stop_loss_pct"] == 0.02
+        assert RISK_CONFIG["min_notional_usd"] == 5.0
+        assert RISK_CONFIG["max_position_size_usd"] == 55.0
 
     def test_market_config_defaults(self):
         from src.config import MARKET_CONFIG
@@ -32,6 +34,7 @@ class TestConfigModule:
     def test_execution_config_paper_trading_default(self):
         from src.config import EXECUTION_CONFIG
         assert EXECUTION_CONFIG["paper_trading"] is True
+        assert EXECUTION_CONFIG["max_open_positions"] == 2
 
     def test_module_level_aliases(self):
         from src.config import (
@@ -41,7 +44,7 @@ class TestConfigModule:
         assert KUCOIN_API_KEY == ""
         assert KUCOIN_API_SECRET == ""
         assert KUCOIN_API_PASSPHRASE == ""
-        assert POSITION_SIZE_USD == 5.0
+        assert POSITION_SIZE_USD == 55.0
         assert MONITOR_INTERVAL_MIN == 5
         assert DRY_RUN is True
         assert LIVE_TRADING is False
