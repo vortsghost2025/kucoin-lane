@@ -11,7 +11,7 @@ from ..base_agent import BaseAgent, AgentStatus
 from ..config import RISK_CONFIG as GLOBAL_RISK_CONFIG
 from .kelly_criterion import KellyPositionSizer
 
-MAX_DAILY_LOSS_CAP = 0.02
+MAX_DAILY_LOSS_CAP = 0.05
 DEFAULT_MIN_POSITION_SIZE_UNITS = 0.001
 DEFAULT_ASSET_CONFIG = {
     "min_signal_strength_adjustment": 0.0,
@@ -58,7 +58,7 @@ class RiskManagementAgent(BaseAgent):
             cfg.get("min_signal_strength", 0.3)
         )
         self.min_win_rate = cfg.get("min_win_rate", 0.45)
-        self.min_notional_usd = cfg.get("min_notional_usd", 10.0)
+        self.min_notional_usd = cfg.get("min_notional_usd", 5.0)
 
         configured_min_size = cfg.get("min_position_size_units")
         self.min_position_size_units = (
@@ -69,7 +69,7 @@ class RiskManagementAgent(BaseAgent):
 
         self.min_position_size_by_pair = cfg.get("min_position_size_by_pair", {})
         self.enforce_min_position_size_only = cfg.get(
-            "enforce_min_position_size_only", True
+            "enforce_min_position_size_only", False
         )
 
         self.cumulative_risk_today = 0.0
@@ -114,6 +114,7 @@ class RiskManagementAgent(BaseAgent):
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         self.log_execution_start("assess_and_size_position")
+        _result = None
 
         try:
             market_data = input_data.get("market_data", {})
@@ -170,51 +171,50 @@ class RiskManagementAgent(BaseAgent):
             if all_approved:
                 self.cumulative_risk_today += total_risk
 
-            return self.create_message(
+            approved_assessment = next(
+                (
+                    (pair_key, a)
+                    for pair_key, a in risk_assessments.items()
+                    if a["position_approved"]
+                ),
+                None,
+            )
+            approved_pair = approved_assessment[0] if approved_assessment else None
+            approved_data = approved_assessment[1] if approved_assessment else {}
+
+            result_data = {
+                "position_approved": any_approved,
+                "rejection_reason": rejection_reason if not any_approved else None,
+                "assessments": risk_assessments,
+                "total_risk_amount": total_risk,
+                "total_risk_pct": (total_risk / self.account_balance) * 100,
+                "cumulative_daily_risk": self.cumulative_risk_today,
+                "account_balance": self.account_balance,
+                "pair": approved_pair,
+                "position_size": approved_data.get("position_size", 0),
+                "stop_loss": approved_data.get("stop_loss"),
+                "take_profit": approved_data.get("take_profit"),
+                "current_price": approved_data.get("current_price"),
+                "stop_loss_pct": approved_data.get("stop_loss_pct"),
+                "take_profit_pct": approved_data.get("take_profit_pct"),
+                "signal_strength": approved_data.get("signal_strength"),
+                "recommendation": approved_data.get("recommendation", "HOLD"),
+            }
+            _result = self.create_message(
                 action="assess_and_size_position",
                 success=True,
-                data={
-                    "position_approved": any_approved,
-                    "rejection_reason": rejection_reason if not any_approved else None,
-                    "assessments": risk_assessments,
-                    "total_risk_amount": total_risk,
-                    "total_risk_pct": (total_risk / self.account_balance) * 100,
-                    "cumulative_daily_risk": self.cumulative_risk_today,
-                    "account_balance": self.account_balance,
-                    "position_size": next(
-                        (
-                            a["position_size"]
-                            for a in risk_assessments.values()
-                            if a["position_approved"]
-                        ),
-                        0,
-                    ),
-                    "stop_loss": next(
-                        (
-                            a["stop_loss"]
-                            for a in risk_assessments.values()
-                            if a["position_approved"]
-                        ),
-                        None,
-                    ),
-                    "take_profit": next(
-                        (
-                            a["take_profit"]
-                            for a in risk_assessments.values()
-                            if a["position_approved"]
-                        ),
-                        None,
-                    ),
-                },
+                data=result_data,
             )
 
         except Exception as e:
             error_msg = f"Risk assessment error: {str(e)}"
             self.set_status(AgentStatus.ERROR, error_msg)
             self.log_execution_end("assess_and_size_position", success=False)
-            return self.create_message(
+            _result = self.create_message(
                 action="assess_and_size_position", success=False, error=error_msg
             )
+
+        return _result
 
     def _assess_pair_risk(
         self,

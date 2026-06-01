@@ -246,7 +246,7 @@ class ExecutionEngine(ABC):
                             current_equity = float(self.config.get("account_balance", 0))
                             if current_equity <= 0:
                                 total_pnl = self._get_total_pnl()
-                                current_equity = float(self.config.get("position_size_usd", 10000.0)) + total_pnl
+                                current_equity = float(self.config.get("position_size_usd", 55.0)) + total_pnl
                             self.portfolio_cb.check(current_equity)
                         except CircuitBreakTriggered as cb_err:
                             self.log("warning", f"[PORTFOLIO CB] Tripped: {cb_err}")
@@ -434,7 +434,7 @@ class DryRunExecutor(ExecutionEngine):
         # Paper trade ledger — persistent tracking across restarts
         self.ledger = PaperTradeLedger(
             filepath=config.get("paper_ledger_path", "paper_trades_ledger.json"),
-            initial_balance=float(config.get("account_balance", 10000)),
+            initial_balance=float(config.get("account_balance", 110)),
         )
         self.log("info", f"Paper trade ledger initialized ({len(self.ledger.get_closed_trades())} historical trades)")
 
@@ -499,7 +499,7 @@ class DryRunExecutor(ExecutionEngine):
         if self.orchestrator is not None:
             self.log("info", "Running paper-live strategy cycle with live market data...")
             try:
-                symbols = self.config.get("trading_pairs", ["SOL/USDT", "BTC/USDT", "ETH/USDT"])
+                symbols = self.config.get("trading_pairs", ["BTC/USDT", "ETH/USDT", "AVAX/USDT", "DOGE/USDT", "LINK/USDT"])
                 result = self.orchestrator.execute(market_symbols=symbols)
                 if isinstance(result, dict):
                     data = result.get("data", {})
@@ -552,8 +552,8 @@ class DryRunExecutor(ExecutionEngine):
                 "data": {"trade_executed": False, "reason": "Invalid position size"},
             }
 
-        pair = list(market_data.keys())[0]
-        market_info = market_data[pair]
+        pair = input_data.get("pair") or list(market_data.keys())[0]
+        market_info = market_data.get(pair, list(market_data.values())[0] if market_data else {})
         entry_price = market_info.get("current_price", 0)
 
         trade = {
@@ -800,8 +800,8 @@ class LiveExecutor(ExecutionEngine):
                 "data": {"trade_executed": False, "reason": session_limit_reason},
             }
 
-        pair = list(market_data.keys())[0]
-        market_info = market_data[pair]
+        pair = input_data.get("pair") or list(market_data.keys())[0]
+        market_info = market_data.get(pair, list(market_data.values())[0] if market_data else {})
         entry_price = market_info.get("current_price", 0)
 
         rejection_reason = self._validate_live_trade(
@@ -1050,13 +1050,20 @@ def select_executor(dry_run: bool, live_trading: bool) -> ExecutionEngine:
         "paper_live": True,
         "position_size_usd": float(POSITION_SIZE_USD),
         "monitor_interval_min": int(MONITOR_INTERVAL_MIN),
-        "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "10.0")),
-        "max_trade_loss_usd": float(os.getenv("MAX_TRADE_LOSS_USD", "5.0")),
-        "max_daily_loss_usd": float(os.getenv("MAX_DAILY_LOSS_USD", "10.0")),
-        "min_balance_usd": float(os.getenv("MIN_BALANCE_USD", "10.0")),
+        "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "55.0")),
+        "max_trade_loss_usd": float(os.getenv("MAX_TRADE_LOSS_USD", "1.10")),
+        "max_daily_loss_usd": float(os.getenv("MAX_DAILY_LOSS_USD", "3.30")),
+        "min_balance_usd": float(os.getenv("MIN_BALANCE_USD", "5.0")),
         "paper_trading": dry_run,
-        "account_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
-        "trading_pairs": os.getenv("TRADING_PAIRS", "SOL/USDT,BTC/USDT,ETH/USDT").split(","),
+        "account_balance": float(os.getenv("ACCOUNT_BALANCE", "110")),
+        "trading_pairs": os.getenv("TRADING_PAIRS", "BTC/USDT,ETH/USDT").split(","),
+        "min_notional_usd": float(os.getenv("MIN_NOTIONAL_USD", "5.0")),
+        "risk_per_trade": float(os.getenv("RISK_PER_TRADE", "0.01")),
+        "min_risk_reward_ratio": float(os.getenv("MIN_RISK_REWARD_RATIO", "1.2")),
+        "max_daily_loss": float(os.getenv("MAX_DAILY_LOSS", "0.03")),
+        "min_signal_strength": float(os.getenv("MIN_SIGNAL_STRENGTH", "0.30")),
+        "min_win_rate": float(os.getenv("MIN_WIN_RATE", "0.45")),
+        "default_stop_loss_pct": float(os.getenv("DEFAULT_STOP_LOSS_PCT", "0.02")),
     }
 
     if dry_run:

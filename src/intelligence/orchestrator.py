@@ -43,14 +43,14 @@ from ..data.kucoin_klines_fetcher import KuCoinKlinesFetcher
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ACCOUNT_BALANCE = 10000.0
+DEFAULT_ACCOUNT_BALANCE = 110.0
 DEFAULT_NOTIONAL_REJECTION_THRESHOLD = 10
 DEFAULT_NOTIONAL_PAUSE_DURATION_HOURS = 1.0
 COOLDOWN_HOURS = 4
 COOLDOWN_SECONDS = COOLDOWN_HOURS * 3600
 V4_ADX_THRESHOLD = 50
 V2_CONSECUTIVE_DOWNTREND_LIMIT = 2
-MIN_ACCOUNT_BALANCE_RECOMMENDATION = 500
+MIN_ACCOUNT_BALANCE_RECOMMENDATION = 50
 LEAD_LAG_DANGER_CONFIDENCE = 1.0
 LEAD_LAG_DANGER_MULTIPLIER = 0.0
 TRENDING_DOWN_CONFIDENCE = 0.9
@@ -78,6 +78,9 @@ V4_HALT_CONFIDENCE = 0.9
 V4_HALT_MULTIPLIER = 0.0
 V4_PROBE_CONFIDENCE = 0.6
 V4_PROBE_MULTIPLIER = 0.5
+SPREAD_WARNING_THRESHOLD = 0.005
+SPREAD_REDUCTION_THRESHOLD = 0.01
+SPREAD_HIGH_THRESHOLD = 0.02
 
 
 class WorkflowStage(Enum):
@@ -116,7 +119,11 @@ class IntelligenceOrchestrator(BaseAgent):
         enable_lead_lag = config.get("enable_lead_lag", True)
         enable_whale = config.get("enable_whale", True)
 
-        self.regime_detector = RegimeDetector() if enable_regime else None
+        self.timeframe = config.get("timeframe") or os.getenv("CANDLE_INTERVAL", "1hour")
+        if "timeframe" not in config:
+            config["timeframe"] = self.timeframe
+
+        self.regime_detector = RegimeDetector(timeframe=self.timeframe) if enable_regime else None
         self.lead_lag = LeadLagMonitor() if enable_lead_lag else None
         self.whale_watch = WhaleWatch() if enable_whale else None
 
@@ -169,15 +176,7 @@ class IntelligenceOrchestrator(BaseAgent):
 
         # Klines/OHLCV fetcher for RegimeDetector + WhaleWatch
         self._klines_fetcher: Optional[KuCoinKlinesFetcher] = None
-        self._exchange_adapter = None  # set via set_exchange_adapter()
-
-        # Timeframe used for per-timeframe asset profile overrides (e.g. RSI/ATR thresholds
-        # that differ between 5min, 1hour, 1day). Sourced from CANDLE_INTERVAL env var so the
-        # main bot loop activates timeframe_overrides — previously only paper_trade_runner.py
-        # passed this key, leaving the production orchestration path with timeframe=None.
-        self.timeframe = config.get("timeframe") or os.getenv("CANDLE_INTERVAL", "1hour")
-        if "timeframe" not in config:
-            config["timeframe"] = self.timeframe
+        self._exchange_adapter = None # set via set_exchange_adapter()
 
         self.consecutive_notional_rejections = 0
         self.notional_rejection_threshold = config.get(
@@ -297,6 +296,13 @@ class IntelligenceOrchestrator(BaseAgent):
     def is_trading_allowed(self) -> tuple[bool, Optional[str]]:
         if self.circuit_breaker_active:
             return False, "Circuit breaker is active"
+        if self.trading_paused and self.pause_timestamp:
+            elapsed_hours = (datetime.now() - self.pause_timestamp).total_seconds() / 3600
+            if elapsed_hours >= self.notional_pause_duration_hours:
+                self.resume_trading(
+                    f"Auto-resume: notional pause duration ({self.notional_pause_duration_hours}h) elapsed"
+                )
+                return True, None
         if self.trading_paused:
             return False, self.pause_reason
         return True, None
@@ -438,6 +444,85 @@ class IntelligenceOrchestrator(BaseAgent):
         except Exception as e:
             self.logger.warning(f"Could not fetch real balance: {e}")
             return self._balance_cache
+
+    def _fetch_ticker_data_and_calculate_spread(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch ticker data and calculate bid-ask spread for given symbols."""
+        spread_data = {}
+
+        if not self._exchange_adapter:
+            self.logger.warning("No exchange adapter available for ticker data")
+            return spread_data
+
+        try:
+            for symbol in symbols:
+                try:
+                    ticker = self._exchange_adapter.get_ticker(symbol)
+                    bid = ticker.get("bid", 0.0)
+                    ask = ticker.get("ask", 0.0)
+                    last = ticker.get("last", 0.0)
+
+                    if bid > 0 and ask > 0:
+                        spread = ask - bid
+                        spread_pct = spread / ((ask + bid) / 2) if (ask + bid) > 0 else 0
+                        mid_price = (ask + bid) / 2
+
+                        spread_data[symbol] = {
+                            "bid": bid,
+                            "ask": ask,
+                            "last": last,
+                            "spread": spread,
+                            "spread_pct": spread_pct,
+                            "mid_price": mid_price,
+                            "timestamp": time.time()
+                        }
+
+                        self.logger.debug(f"Ticker {symbol}: Bid={bid:.6f}, Ask={ask:.6f}, Spread={spread:.6f} ({spread_pct:.2%})")
+                    else:
+                        self.logger.warning(f"Invalid ticker data for {symbol}: bid={bid}, ask={ask}")
+                        spread_data[symbol] = {
+                            "error": "Invalid ticker data",
+                            "timestamp": time.time()
+                        }
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch ticker for {symbol}: {e}")
+                    spread_data[symbol] = {
+                        "error": str(e),
+                        "timestamp": time.time()
+                    }
+        except Exception as e:
+            self.logger.error(f"Error fetching ticker data: {e}")
+
+        return spread_data
+
+    def _check_spread_and_adjust_execution(self, spread_data: Dict[str, Dict[str, Any]]) -> tuple[bool, str]:
+        """Check if spreads are too wide and determine if execution should be reduced.
+
+        Returns:
+        (should_reduce_execution, reason)
+        """
+        if not spread_data:
+            return False, "No spread data available"
+
+        max_spread_pct = 0.0
+        max_spread_symbol = None
+
+        for symbol, data in spread_data.items():
+            if "spread_pct" in data:
+                spread_pct = data["spread_pct"]
+                if spread_pct > max_spread_pct:
+                    max_spread_pct = spread_pct
+                    max_spread_symbol = symbol
+
+        # Check thresholds
+        if max_spread_pct >= SPREAD_HIGH_THRESHOLD:
+            return True, f"Extreme spread detected on {max_spread_symbol}: {max_spread_pct:.2%} >= {SPREAD_HIGH_THRESHOLD:.2%}"
+        elif max_spread_pct >= SPREAD_REDUCTION_THRESHOLD:
+            return True, f"Wide spread detected on {max_spread_symbol}: {max_spread_pct:.2%} >= {SPREAD_REDUCTION_THRESHOLD:.2%}"
+        elif max_spread_pct >= SPREAD_WARNING_THRESHOLD:
+            self.logger.warning(f"Elevated spread on {max_spread_symbol}: {max_spread_pct:.2%} >= {SPREAD_WARNING_THRESHOLD:.2%}")
+            return False, f"Elevated spread warning: {max_spread_pct:.2%}"
+        else:
+            return False, f"Spread within normal bounds: {max_spread_pct:.2%}"
 
     def _validate_agent_output(
         self,
@@ -788,11 +873,6 @@ class IntelligenceOrchestrator(BaseAgent):
                 self.activate_circuit_breaker(
                     "Data fetching returned empty market data"
                 )
-                cycle_results["final_result"] = self.create_message(
-                    action="orchestrate_workflow",
-                    success=False,
-                    error="Empty market data from DataFetchingAgent",
-                )
                 return cycle_results["final_result"]
 
             self.transition_stage(WorkflowStage.ANALYZING_MARKET)
@@ -822,6 +902,26 @@ class IntelligenceOrchestrator(BaseAgent):
             # ── Klines/OHLCV Intelligence: RegimeDetector + WhaleWatch ──
             if self._klines_fetcher and self._exchange_adapter:
                 try:
+                    # === SPREAD MONITORING ===
+                    # Fetch ticker data and calculate bid-ask spreads
+                    spread_data = self._fetch_ticker_data_and_calculate_spread(list(market_data.keys()))
+
+                    # Log spread information
+                    for symbol, data in spread_data.items():
+                        if "spread_pct" in data:
+                            self.logger.info(f"[SPREAD] {symbol}: {data['spread_pct']:.2%} (bid: {data['bid']:.6f}, ask: {data['ask']:.6f})")
+                        else:
+                            self.logger.warning(f"[SPREAD] {symbol}: Unable to calculate spread - {data.get('error', 'unknown error')}")
+
+                    # Check if execution should be reduced due to wide spreads
+                    should_reduce, spread_reason = self._check_spread_and_adjust_execution(spread_data)
+                    if should_reduce:
+                        self.logger.warning(f"[SPREAD] {spread_reason} - Activating REDUCED_EXECUTION mode")
+                        cycle_results["spread_data"] = spread_data
+                        cycle_results["spread_warning"] = spread_reason
+                    else:
+                        self.logger.debug(f"[SPREAD] {spread_reason}")
+
                     for pair in market_symbols:
                         df = self._klines_fetcher.fetch_klines(
                             self._exchange_adapter, pair
@@ -1087,23 +1187,28 @@ class IntelligenceOrchestrator(BaseAgent):
                 )
             else:
                 self.transition_stage(WorkflowStage.EXECUTING)
-            exec_result = self._execute_agent_phase(
-                "ExecutionAgent",
-                "execute_trade",
-                {
-                    "market_data": market_data,
-                    "position_size": risk_data.get("position_size"),
-                    "stop_loss": risk_data.get("stop_loss"),
-                    "take_profit": risk_data.get("take_profit"),
-                    "paper_trading": self.is_paper_trading,
-                    "account_balance": risk_data.get("account_balance"),
-                    "position_approved": risk_data.get("position_approved", False),
-                    "risk_approved": risk_data.get("position_approved", False),
-                    "analysis": analysis_data.get("analysis", {}),
-                    "backtest_results": backtest_data.get("backtest_results", {}),
-                },
-            )
-            cycle_results["exec_result"] = exec_result
+                approved_pair = risk_data.get("pair")
+                exec_market_data = market_data
+                if approved_pair and approved_pair in market_data:
+                    exec_market_data = {approved_pair: market_data[approved_pair]}
+                exec_result = self._execute_agent_phase(
+                    "ExecutionAgent",
+                    "execute_trade",
+                    {
+                        "market_data": exec_market_data,
+                        "pair": approved_pair,
+                        "position_size": risk_data.get("position_size"),
+                        "stop_loss": risk_data.get("stop_loss"),
+                        "take_profit": risk_data.get("take_profit"),
+                        "paper_trading": self.is_paper_trading,
+                        "account_balance": risk_data.get("account_balance"),
+                        "position_approved": risk_data.get("position_approved", False),
+                        "risk_approved": risk_data.get("position_approved", False),
+                        "analysis": analysis_data.get("analysis", {}),
+                        "backtest_results": backtest_data.get("backtest_results", {}),
+                    },
+                )
+                cycle_results["exec_result"] = exec_result
 
             if not self._validate_agent_output(
                 exec_result, "ExecutionAgent", ["trade_executed"]
