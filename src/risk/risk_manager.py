@@ -9,6 +9,7 @@ import logging
 
 from ..base_agent import BaseAgent, AgentStatus
 from ..config import RISK_CONFIG as GLOBAL_RISK_CONFIG
+from ..utils.timeframe import apply_timeframe_overrides, resolve_timeframe
 from .kelly_criterion import KellyPositionSizer
 
 MAX_DAILY_LOSS_CAP = 0.05
@@ -73,7 +74,7 @@ class RiskManagementAgent(BaseAgent):
         )
 
         self.cumulative_risk_today = 0.0
-        self.timeframe = cfg.get("timeframe", None)
+        self.timeframe = resolve_timeframe(cfg)
 
         global_asset_default = GLOBAL_RISK_CONFIG.get("asset_config_default", {})
         config_asset_default = cfg.get("asset_config_default", {})
@@ -334,10 +335,7 @@ class RiskManagementAgent(BaseAgent):
             **self.asset_configs.get(pair, {}),
         }
 
-        if self.timeframe:
-            tf_overrides = self.asset_configs.get(pair, {}).get("timeframe_overrides", {})
-            if isinstance(tf_overrides, dict) and self.timeframe in tf_overrides and isinstance(tf_overrides[self.timeframe], dict):
-                asset_config = {**asset_config, **tf_overrides[self.timeframe]}
+        asset_config = apply_timeframe_overrides(asset_config, self.asset_configs.get(pair, {}), self.timeframe)
 
         stop_loss_adjustment = asset_config["stop_loss_adjustment"]
         position_size_multiplier = asset_config["position_size_multiplier"]

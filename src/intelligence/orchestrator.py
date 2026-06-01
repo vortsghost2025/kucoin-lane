@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from ..base_agent import BaseAgent, AgentStatus
-from ..config import REGIME_GUARD_MODE
+from ..config import REGIME_GUARD_MODE, SPOT_LONG_ONLY
 from ..risk.circuit_breaker import CircuitBreaker
 from ..risk.portfolio_circuit_breaker import (
     PortfolioCircuitBreaker,
@@ -648,6 +648,15 @@ class IntelligenceOrchestrator(BaseAgent):
 
         if results["regime"]:
             regime = results["regime"]
+
+            spot_long_only = self.config.get("spot_long_only", SPOT_LONG_ONLY)
+            if spot_long_only and regime["recommendation"] == "SHORT_TREND":
+                return (
+                    "HOLD",
+                    TRENDING_DOWN_CONFIDENCE,
+                    TRENDING_DOWN_MULTIPLIER,
+                    f"SPOT_LONG_ONLY: SHORT_TREND detected (ADX: {regime['adx']:.1f}), holding — no short positions",
+                )
 
             if regime["recommendation"] == "HALT_TRADING":
                 if self.regime_guard_mode == "v1_soft_halt":

@@ -23,43 +23,13 @@ from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
+from ..utils.timeframe import SUPPORTED_INTERVALS, get_cache_timeout
+
 logger = logging.getLogger(__name__)
 
 _MIN_INTERVAL_SECONDS = 1.0
 _lock = threading.Lock()
 _last_call_ts = 0.0
-
-SUPPORTED_INTERVALS = {
-    "1min",
-    "3min",
-    "5min",
-    "15min",
-    "30min",
-    "1hour",
-    "2hour",
-    "4hour",
-    "6hour",
-    "8hour",
-    "12hour",
-    "1day",
-    "1week",
-}
-
-INTERVAL_CACHE_TIMEOUTS = {
-    "1min": 60,
-    "3min": 180,
-    "5min": 300,
-    "15min": 900,
-    "30min": 1800,
-    "1hour": 3600,
-    "2hour": 7200,
-    "4hour": 14400,
-    "6hour": 21600,
-    "8hour": 28800,
-    "12hour": 43200,
-    "1day": 86400,
-    "1week": 604800,
-}
 
 DEFAULT_CANDLE_COUNT = 100
 
@@ -105,7 +75,7 @@ class KuCoinKlinesFetcher:
         cached_time = self._cache[cache_key].get("timestamp")
         if not cached_time:
             return False
-        timeout = INTERVAL_CACHE_TIMEOUTS.get(interval, 300)
+        timeout = get_cache_timeout(interval)
         age = (datetime.now(timezone.utc) - cached_time).total_seconds()
         return age < timeout
 

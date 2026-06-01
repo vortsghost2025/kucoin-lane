@@ -10,6 +10,7 @@ from datetime import datetime
 
 from ..base_agent import BaseAgent, AgentStatus
 from ..config import BACKTEST_CONFIG as GLOBAL_BACKTEST_CONFIG
+from ..utils.timeframe import apply_timeframe_overrides, resolve_timeframe
 from .historical_backtester import HistoricalBacktester
 
 
@@ -39,7 +40,7 @@ class BacktestingAgent(BaseAgent):
         )
         self.max_drawdown_allowed = cfg.get("max_drawdown", 0.15)
         self.historical_data: Dict[str, Any] = {}
-        self.timeframe = cfg.get("timeframe", None)
+        self.timeframe = resolve_timeframe(cfg)
 
         global_default = GLOBAL_BACKTEST_CONFIG.get("asset_factor_default", {})
         config_default = cfg.get("asset_factor_default", {})
@@ -128,10 +129,7 @@ class BacktestingAgent(BaseAgent):
             **self.asset_performance_factors.get(pair, {}),
         }
 
-        if self.timeframe:
-            tf_overrides = self.asset_performance_factors.get(pair, {}).get("timeframe_overrides", {})
-            if isinstance(tf_overrides, dict) and self.timeframe in tf_overrides and isinstance(tf_overrides[self.timeframe], dict):
-                asset_factor = {**asset_factor, **tf_overrides[self.timeframe]}
+        asset_factor = apply_timeframe_overrides(asset_factor, self.asset_performance_factors.get(pair, {}), self.timeframe)
 
         win_rate_multiplier = asset_factor["win_rate_multiplier"]
         drawdown_adjustment = asset_factor["max_drawdown_adjustment"]
@@ -227,10 +225,7 @@ class BacktestingAgent(BaseAgent):
             **self.asset_performance_factors.get(pair, {}),
         }
 
-        if self.timeframe:
-            tf_overrides = self.asset_performance_factors.get(pair, {}).get("timeframe_overrides", {})
-            if isinstance(tf_overrides, dict) and self.timeframe in tf_overrides and isinstance(tf_overrides[self.timeframe], dict):
-                asset_factor = {**asset_factor, **tf_overrides[self.timeframe]}
+        asset_factor = apply_timeframe_overrides(asset_factor, self.asset_performance_factors.get(pair, {}), self.timeframe)
 
         adjusted_win_rate = win_rate * asset_factor["win_rate_multiplier"]
 
@@ -254,10 +249,7 @@ class BacktestingAgent(BaseAgent):
             **self.asset_performance_factors.get(pair, {}),
         }
 
-        if self.timeframe:
-            tf_overrides = self.asset_performance_factors.get(pair, {}).get("timeframe_overrides", {})
-            if isinstance(tf_overrides, dict) and self.timeframe in tf_overrides and isinstance(tf_overrides[self.timeframe], dict):
-                asset_factor = {**asset_factor, **tf_overrides[self.timeframe]}
+        asset_factor = apply_timeframe_overrides(asset_factor, self.asset_performance_factors.get(pair, {}), self.timeframe)
 
         adjusted_win_rate = win_rate * asset_factor["win_rate_multiplier"]
 
@@ -281,10 +273,7 @@ class BacktestingAgent(BaseAgent):
             **self.asset_performance_factors.get(pair, {}),
         }
 
-        if self.timeframe:
-            tf_overrides = self.asset_performance_factors.get(pair, {}).get("timeframe_overrides", {})
-            if isinstance(tf_overrides, dict) and self.timeframe in tf_overrides and isinstance(tf_overrides[self.timeframe], dict):
-                asset_factor = {**asset_factor, **tf_overrides[self.timeframe]}
+        asset_factor = apply_timeframe_overrides(asset_factor, self.asset_performance_factors.get(pair, {}), self.timeframe)
 
         final_drawdown = adjusted_drawdown * asset_factor["max_drawdown_adjustment"]
 

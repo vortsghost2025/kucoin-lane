@@ -30,6 +30,8 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 from src.trading.paper_trade_ledger import PaperTradeLedger
+from src.config import SPOT_LONG_ONLY
+from src.utils.timeframe import get_bars_per_day
 from src.intelligence.market_analyzer import MarketAnalysisAgent
 from src.intelligence.backtester import BacktestingAgent
 from src.intelligence.regime_detector import RegimeDetector
@@ -44,15 +46,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("paper_runner")
 
-BARS_PER_DAY = {
-    "1min": 1440,
-    "5min": 288,
-    "15min": 96,
-    "30min": 48,
-    "1hour": 24,
-    "6hour": 4,
-    "1day": 1,
-}
 
 
 def parse_args():
@@ -189,6 +182,7 @@ class PublicKlinesAdapter:
 
 def run_simulation(args):
     pairs = [p.strip() for p in args.pairs.split(",")]
+    spot_long_only = SPOT_LONG_ONLY
 
     logger.info(f"Paper Trade Simulation Starting")
     logger.info(f"  Pairs: {pairs}")
@@ -295,7 +289,7 @@ def run_simulation(args):
             current_price = float(bar["close"])
 
             # Bars per day varies by interval — use correct lookback for true 24h comparison
-            lookback = min(BARS_PER_DAY.get(args.interval, 24), bar_idx)
+            lookback = min(get_bars_per_day(args.interval), bar_idx)
             price_24h_ago = float(df.iloc[bar_idx - lookback]["close"])
             price_change_24h_pct = ((current_price - price_24h_ago) / price_24h_ago) * 100
 
@@ -304,7 +298,7 @@ def run_simulation(args):
                 prev_close = float(df.iloc[bar_idx - 1]["close"])
                 price_change_1bar_pct = ((current_price - prev_close) / prev_close) * 100
 
-            vol_lookback = min(BARS_PER_DAY.get(args.interval, 24), bar_idx + 1)
+            vol_lookback = min(get_bars_per_day(args.interval), bar_idx + 1)
             volume_24h = float(df.iloc[bar_idx - vol_lookback + 1:bar_idx + 1]["volume"].sum())
 
             market_data = {
@@ -352,10 +346,15 @@ def run_simulation(args):
                     intel_action = "HOLD"
                     intel_confidence = 0.5
                     intel_multiplier = 0.5
-                elif regime_result and regime_result.get("recommendation") == "SHORT_TREND":
-                    intel_action = "SELL"
-                    intel_confidence = regime_result.get("confidence", 0.5)
-                    intel_multiplier = regime_detector.get_position_multiplier(regime_result)
+            elif regime_result and regime_result.get("recommendation") == "SHORT_TREND":
+                if spot_long_only:
+                        intel_action = "HOLD"
+                        intel_confidence = regime_result.get("confidence", 0.5)
+                        intel_multiplier = 0.0
+                    else:
+                        intel_action = "SELL"
+                        intel_confidence = regime_result.get("confidence", 0.5)
+                        intel_multiplier = regime_detector.get_position_multiplier(regime_result)
             except Exception as e:
                 if args.verbose:
                     logger.debug(f"  Intelligence analysis failed: {e}")

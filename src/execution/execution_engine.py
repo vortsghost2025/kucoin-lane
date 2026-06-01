@@ -37,10 +37,12 @@ from ..config import (
     MONITOR_INTERVAL_MIN,
     DRY_RUN,
     LIVE_TRADING,
+    SPOT_LONG_ONLY,
 )
 from .exchange_adapter import ExchangeAdapter, KuCoinAdapter
 from ..risk.circuit_breaker import CircuitBreaker
 from ..risk.portfolio_circuit_breaker import PortfolioCircuitBreaker, CircuitBreakTriggered
+from ..utils.timeframe import resolve_timeframe, DEFAULT_TIMEFRAME
 
 logger = logging.getLogger(__name__)
 
@@ -320,8 +322,13 @@ class ExecutionEngine(ABC):
             self.log("warning", f"Trade {trade_id} not found")
             return {}
 
-        pnl = (exit_price - trade["entry_price"]) * trade["position_size"]
-        pnl_pct = (exit_price - trade["entry_price"]) / trade["entry_price"] * 100
+        direction = trade.get("direction", "long")
+        if direction == "short":
+            pnl = (trade["entry_price"] - exit_price) * trade["position_size"]
+            pnl_pct = (trade["entry_price"] - exit_price) / trade["entry_price"] * 100
+        else:
+            pnl = (exit_price - trade["entry_price"]) * trade["position_size"]
+            pnl_pct = (exit_price - trade["entry_price"]) / trade["entry_price"] * 100
 
         trade["exit_price"] = exit_price
         trade["exit_time"] = datetime.utcnow().isoformat()
@@ -343,6 +350,44 @@ class ExecutionEngine(ABC):
         )
         return trade
 
+    def _handle_spot_long_only_sell(self, pair: str, recommendation: str, entry_price: float) -> Optional[Dict[str, Any]]:
+        """Handle SELL/SHORT signal in spot-long-only mode.
+
+        If spot_long_only is enabled and the signal is SELL/SHORT:
+        - Close existing long positions for the pair
+        - Return skip dict (no new short position)
+
+        Returns None if the signal should proceed normally (BUY/HOLD or spot_long_only disabled).
+        """
+        spot_long_only = self.config.get("spot_long_only", SPOT_LONG_ONLY)
+        if not spot_long_only or recommendation not in ("SELL", "SHORT"):
+            return None
+
+        existing = [p for p in self.open_positions if p.get("pair") == pair and p.get("direction", "long") == "long"]
+        if existing:
+            self.log("info", f"[SPOT_LONG_ONLY] Closing long position on SELL signal for {pair}")
+            for pos in existing:
+                self._close_spot_long_position(pos, pair, entry_price)
+        else:
+            self.log("info", f"[SPOT_LONG_ONLY] SELL signal for {pair} — no long position to close, skipping")
+
+        return {
+            "agent": self.__class__.__name__,
+            "action": "execute_trade",
+            "success": True,
+            "data": {
+                "trade_executed": False,
+                "reason": "spot_long_only: SELL/SHORT signals close longs or skip",
+                "pair": pair,
+                "closed_positions": len(existing) if existing else 0,
+            },
+        }
+
+    def _close_spot_long_position(self, pos: Dict, pair: str, entry_price: float):
+        """Close a spot-long position. Override in subclasses for exchange-specific behavior."""
+        close_result = self.close_position(pos["trade_id"], entry_price, "spot_long_only_sell_signal")
+        self.log("info", f"[SPOT_LONG_ONLY] Closed trade {pos['trade_id']}: {close_result}")
+
     def update_open_positions(
         self, current_prices: Dict[str, float]
     ) -> List[Dict[str, Any]]:
@@ -354,20 +399,27 @@ class ExecutionEngine(ABC):
             if pair not in current_prices:
                 continue
 
-            current_price = current_prices[pair]
+        current_price = current_prices[pair]
+        direction = trade.get("direction", "long")
+        if direction == "short":
+            pnl = (trade["entry_price"] - current_price) * trade["position_size"]
+            pnl_pct = (trade["entry_price"] - current_price) / trade["entry_price"] * 100
+        else:
             pnl = (current_price - trade["entry_price"]) * trade["position_size"]
-            pnl_pct = (
-                (current_price - trade["entry_price"]) / trade["entry_price"] * 100
-            )
-            trade["pnl"] = pnl
-            trade["pnl_pct"] = pnl_pct
+            pnl_pct = (current_price - trade["entry_price"]) / trade["entry_price"] * 100
+        trade["pnl"] = pnl
+        trade["pnl_pct"] = pnl_pct
 
+        if direction == "short":
+            if current_price >= trade["stop_loss"]:
+                trades_to_close.append((trade["trade_id"], current_price, "stop_loss"))
+            elif current_price <= trade["take_profit"]:
+                trades_to_close.append((trade["trade_id"], current_price, "take_profit"))
+        else:
             if current_price <= trade["stop_loss"]:
                 trades_to_close.append((trade["trade_id"], current_price, "stop_loss"))
             elif current_price >= trade["take_profit"]:
-                trades_to_close.append(
-                    (trade["trade_id"], current_price, "take_profit")
-                )
+                trades_to_close.append((trade["trade_id"], current_price, "take_profit"))
 
         for trade_id, exit_price, reason in trades_to_close:
             closed = self.close_position(trade_id, exit_price, reason)
@@ -450,7 +502,7 @@ class DryRunExecutor(ExecutionEngine):
                 orch_config = dict(config)
                 orch_config["paper_trading"] = True
                 orch_config["paper_live"] = False
-                orch_config.setdefault("timeframe", os.getenv("CANDLE_INTERVAL", "1hour"))
+                orch_config.setdefault("timeframe", resolve_timeframe(orch_config))
                 self.orchestrator = IntelligenceOrchestrator(orch_config)
                 self.orchestrator.register_agent(DataFetchingAgent(orch_config))
                 self.orchestrator.register_agent(MarketAnalysisAgent(orch_config))
@@ -556,6 +608,20 @@ class DryRunExecutor(ExecutionEngine):
         market_info = market_data.get(pair, list(market_data.values())[0] if market_data else {})
         entry_price = market_info.get("current_price", 0)
 
+        analysis_data = input_data.get("analysis", {})
+        pair_analysis = analysis_data.get(pair, {})
+        recommendation = pair_analysis.get("recommendation", "HOLD")
+
+        sell_result = self._handle_spot_long_only_sell(pair, recommendation, entry_price)
+        if sell_result is not None:
+            return sell_result
+
+        spot_long_only = self.config.get("spot_long_only", SPOT_LONG_ONLY)
+        if spot_long_only:
+            direction = "long"
+        else:
+            direction = "short" if recommendation in ("SELL", "SHORT") else "long"
+
         trade = {
             "trade_id": self.total_trades + 1,
             "pair": pair,
@@ -566,6 +632,7 @@ class DryRunExecutor(ExecutionEngine):
             "take_profit": take_profit,
             "entry_time": datetime.utcnow().isoformat(),
             "status": TradeStatus.OPEN.value,
+            "direction": direction,
             "paper_trading": True,
             "pnl": 0,
             "pnl_pct": 0,
@@ -589,11 +656,7 @@ class DryRunExecutor(ExecutionEngine):
 
         # Record in persistent ledger
         try:
-            analysis_data = input_data.get("analysis", {})
             backtest_results = input_data.get("backtest_results", {})
-            pair_analysis = analysis_data.get(pair, {})
-            recommendation = pair_analysis.get("recommendation", "HOLD")
-            direction = "short" if recommendation in ("SELL", "SHORT") else "long"
             pair_backtest = backtest_results.get(pair, {})
             backtest_win_rate = pair_backtest.get("win_rate", 0.0)
             backtest_data_source = pair_backtest.get("data_source", "")
@@ -804,6 +867,14 @@ class LiveExecutor(ExecutionEngine):
         market_info = market_data.get(pair, list(market_data.values())[0] if market_data else {})
         entry_price = market_info.get("current_price", 0)
 
+        analysis_data = input_data.get("analysis", {})
+        pair_analysis = analysis_data.get(pair, {})
+        recommendation = pair_analysis.get("recommendation", "HOLD")
+
+        sell_result = self._handle_spot_long_only_sell(pair, recommendation, entry_price)
+        if sell_result is not None:
+            return sell_result
+
         rejection_reason = self._validate_live_trade(
             entry_price=entry_price,
             position_size=position_size,
@@ -822,9 +893,10 @@ class LiveExecutor(ExecutionEngine):
         order_details = None
         try:
             self.log("warning", "LIVE TRADING ACTIVATED - Placing real order")
+            side = "buy"
             order_details = self.adapter.place_order(
                 pair=pair,
-                side="buy",
+                side=side,
                 size=position_size,
                 order_type=self.order_type,
                 price=entry_price if self.order_type == "limit" else None,
@@ -923,6 +995,7 @@ class LiveExecutor(ExecutionEngine):
             "take_profit": take_profit,
             "entry_time": datetime.utcnow().isoformat(),
             "status": TradeStatus.OPEN.value,
+            "direction": "long",
             "paper_trading": False,
             "pnl": 0,
             "pnl_pct": 0,
@@ -961,6 +1034,26 @@ class LiveExecutor(ExecutionEngine):
                 "open_positions_count": len(self.open_positions),
             },
         }
+
+    def _close_spot_long_position(self, pos: Dict, pair: str, entry_price: float):
+        """Close a spot-long position on the exchange, then update internal state."""
+        order_ok = False
+        try:
+            self.adapter.place_order(
+                pair=pair,
+                side="sell",
+                size=pos["position_size"],
+                order_type=self.order_type,
+                price=entry_price if self.order_type == "limit" else None,
+            )
+            order_ok = True
+        except Exception as e:
+            self.log("error", f"[SPOT_LONG_ONLY] Failed to place close-sell order for trade {pos['trade_id']}: {e}")
+        if order_ok:
+            close_result = self.close_position(pos["trade_id"], entry_price, "spot_long_only_sell_signal")
+            self.log("info", f"[SPOT_LONG_ONLY] Closed trade {pos['trade_id']}: {close_result}")
+        else:
+            self.log("warning", f"[SPOT_LONG_ONLY] Trade {pos['trade_id']} still open on exchange — close-sell failed, will retry next cycle")
 
     def _check_existing_positions_at_startup(self) -> None:
         if not self.adapter:
@@ -1048,6 +1141,7 @@ def select_executor(dry_run: bool, live_trading: bool) -> ExecutionEngine:
         "dry_run": dry_run,
         "live_trading": live_trading,
         "paper_live": True,
+        "spot_long_only": SPOT_LONG_ONLY,
         "position_size_usd": float(POSITION_SIZE_USD),
         "monitor_interval_min": int(MONITOR_INTERVAL_MIN),
         "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "55.0")),

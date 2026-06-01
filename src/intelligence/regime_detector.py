@@ -17,20 +17,9 @@ from ta.trend import ADXIndicator
 from ta.volatility import AverageTrueRange
 from typing import Dict
 
-logger = logging.getLogger(__name__)
+from ..utils.timeframe import ATR_THRESHOLD_BY_TIMEFRAME, get_atr_threshold
 
-# ATR high threshold scaling by timeframe.
-# 1h baseline = 0.04; higher timeframes have intrinsically wider ATR values
-# so the threshold must scale up to avoid false HIGH_VOL classifications.
-ATR_THRESHOLD_BY_TIMEFRAME = {
-    "1min": 0.01,
-    "5min": 0.02,
-    "15min": 0.025,
-    "30min": 0.03,
-    "1hour": 0.04,
-    "6hour": 0.10,
-    "1day": 0.15,
-}
+logger = logging.getLogger(__name__)
 
 
 class RegimeDetector:
@@ -82,7 +71,7 @@ class RegimeDetector:
         if atr_high_threshold is not None:
             self.atr_high = atr_high_threshold
         else:
-            self.atr_high = ATR_THRESHOLD_BY_TIMEFRAME.get(self.timeframe, 0.04)
+            self.atr_high = get_atr_threshold(self.timeframe)
 
         self.current_regime = None
         self.regime_confidence = 0.0
