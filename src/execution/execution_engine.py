@@ -90,6 +90,8 @@ class TradeStatus(Enum):
 class ExecutionEngine(ABC):
     """Base class for execution engines with heartbeat and continuous loop."""
 
+    MIN_PROFIT_TO_HOLD_PCT = 1.0
+
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         mode_suffix = "dry_run" if "DryRun" in self.__class__.__name__ else "live"
@@ -354,11 +356,13 @@ class ExecutionEngine(ABC):
         )
         return trade
 
-    def _handle_spot_long_only_sell(self, pair: str, recommendation: str, entry_price: float) -> Optional[Dict[str, Any]]:
+    def _handle_spot_long_only_sell(self, pair: str, recommendation: str, current_price: float) -> Optional[Dict[str, Any]]:
         """Handle SELL/SHORT signal in spot-long-only mode.
 
         If spot_long_only is enabled and the signal is SELL/SHORT:
-        - Close existing long positions for the pair
+        - If position profit < MIN_PROFIT_TO_HOLD_PCT → close to protect capital
+        - If position profit >= MIN_PROFIT_TO_HOLD_PCT → hold through SELL signal,
+          let trailing stop / TP / progressive ROI manage exit
         - Return skip dict (no new short position)
 
         Returns None if the signal should proceed normally (BUY/HOLD or spot_long_only disabled).
@@ -368,12 +372,46 @@ class ExecutionEngine(ABC):
             return None
 
         existing = [p for p in self.open_positions if p.get("pair") == pair and p.get("direction", "long") == "long"]
-        if existing:
-            self.log("info", f"[SPOT_LONG_ONLY] Closing long position on SELL signal for {pair}")
-            for pos in existing:
-                self._close_spot_long_position(pos, pair, entry_price)
-        else:
+        if not existing:
             self.log("info", f"[SPOT_LONG_ONLY] SELL signal for {pair} — no long position to close, skipping")
+            return {
+                "agent": self.__class__.__name__,
+                "action": "execute_trade",
+                "success": True,
+                "data": {
+                    "trade_executed": False,
+                    "reason": "spot_long_only: SELL/SHORT signals close longs or skip",
+                    "pair": pair,
+                    "closed_positions": 0,
+                },
+            }
+
+        positions_to_close = []
+        positions_to_hold = []
+
+        for pos in existing:
+            entry = pos.get("entry_price", 0)
+            if entry <= 0:
+                positions_to_close.append(pos)
+                continue
+            profit_pct = (current_price - entry) / entry * 100.0
+            if profit_pct < self.MIN_PROFIT_TO_HOLD_PCT:
+                positions_to_close.append(pos)
+            else:
+                positions_to_hold.append(pos)
+                logger.info(
+                    f"[SPOT_LONG_ONLY] Holding {pair} long through SELL signal: "
+                    f"profit {profit_pct:.2f}% >= {self.MIN_PROFIT_TO_HOLD_PCT}% threshold — "
+                    f"trailing stop / TP / ROI will manage exit"
+                )
+
+        for pos in positions_to_close:
+            profit_pct = (current_price - pos.get("entry_price", 0)) / pos.get("entry_price", 1) * 100.0
+            logger.info(
+                f"[SPOT_LONG_ONLY] Closing {pair} long on SELL signal: "
+                f"profit {profit_pct:.2f}% < {self.MIN_PROFIT_TO_HOLD_PCT}% threshold"
+            )
+            self._close_spot_long_position(pos, pair, current_price)
 
         return {
             "agent": self.__class__.__name__,
@@ -383,13 +421,14 @@ class ExecutionEngine(ABC):
                 "trade_executed": False,
                 "reason": "spot_long_only: SELL/SHORT signals close longs or skip",
                 "pair": pair,
-                "closed_positions": len(existing) if existing else 0,
+                "closed_positions": len(positions_to_close),
+                "held_positions": len(positions_to_hold),
             },
         }
 
-    def _close_spot_long_position(self, pos: Dict, pair: str, entry_price: float):
+    def _close_spot_long_position(self, pos: Dict, pair: str, current_price: float):
         """Close a spot-long position. Override in subclasses for exchange-specific behavior."""
-        close_result = self.close_position(pos["trade_id"], entry_price, "spot_long_only_sell_signal")
+        close_result = self.close_position(pos["trade_id"], current_price, "spot_long_only_sell_signal")
         self.log("info", f"[SPOT_LONG_ONLY] Closed trade {pos['trade_id']}: {close_result}")
 
     def update_open_positions(
@@ -1101,7 +1140,7 @@ class LiveExecutor(ExecutionEngine):
             },
         }
 
-    def _close_spot_long_position(self, pos: Dict, pair: str, entry_price: float):
+    def _close_spot_long_position(self, pos: Dict, pair: str, current_price: float):
         """Close a spot-long position on the exchange, then update internal state."""
         order_ok = False
         try:
@@ -1110,13 +1149,13 @@ class LiveExecutor(ExecutionEngine):
                 side="sell",
                 size=pos["position_size"],
                 order_type=self.order_type,
-                price=entry_price if self.order_type == "limit" else None,
+                price=current_price if self.order_type == "limit" else None,
             )
             order_ok = True
         except Exception as e:
             self.log("error", f"[SPOT_LONG_ONLY] Failed to place close-sell order for trade {pos['trade_id']}: {e}")
         if order_ok:
-            close_result = self.close_position(pos["trade_id"], entry_price, "spot_long_only_sell_signal")
+            close_result = self.close_position(pos["trade_id"], current_price, "spot_long_only_sell_signal")
             self.log("info", f"[SPOT_LONG_ONLY] Closed trade {pos['trade_id']}: {close_result}")
         else:
             self.log("warning", f"[SPOT_LONG_ONLY] Trade {pos['trade_id']} still open on exchange — close-sell failed, will retry next cycle")

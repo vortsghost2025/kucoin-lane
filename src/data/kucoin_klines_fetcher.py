@@ -147,6 +147,8 @@ class KuCoinKlinesFetcher:
         interval = interval or self.default_interval
         candle_count = candle_count or self.default_candle_count
 
+        symbol = symbol.replace("-", "/")
+
         if interval not in SUPPORTED_INTERVALS:
             logger.error(f"Unsupported kline interval: {interval}. Supported: {SUPPORTED_INTERVALS}")
             return None
