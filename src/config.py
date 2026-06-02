@@ -193,7 +193,7 @@ TRADING_CONFIG = {
 RISK_CONFIG = {
     "risk_per_trade": float(os.getenv("RISK_PER_TRADE", "0.01")),
     "min_risk_reward_ratio": float(os.getenv("MIN_RISK_REWARD_RATIO", "2.0")),
-    "max_daily_loss": float(os.getenv("MAX_DAILY_LOSS", "0.03")),
+    "max_daily_loss": float(os.getenv("MAX_DAILY_LOSS", "0.05")),
     "account_balance": float(os.getenv("ACCOUNT_BALANCE", "110")),
     "min_signal_strength": float(os.getenv("MIN_SIGNAL_STRENGTH", "0.30")),
     "min_win_rate": float(os.getenv("MIN_WIN_RATE", "0.45")),
@@ -292,5 +292,5 @@ LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
 
 MAX_POSITION_SIZE_USD_GLOBAL = float(os.getenv("MAX_POSITION_SIZE_USD", "55.0"))
 MAX_TRADE_LOSS_USD = float(os.getenv("MAX_TRADE_LOSS_USD", "1.10"))
-MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "3.30"))
+MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "5.50"))
 MIN_BALANCE_USD = float(os.getenv("MIN_BALANCE_USD", "5.0"))

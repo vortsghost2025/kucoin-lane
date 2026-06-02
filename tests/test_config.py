@@ -13,7 +13,7 @@ class TestConfigModule:
         from src.config import RISK_CONFIG
         assert RISK_CONFIG["risk_per_trade"] == 0.01
         assert RISK_CONFIG["min_risk_reward_ratio"] == 2.0
-        assert RISK_CONFIG["max_daily_loss"] == 0.03
+        assert RISK_CONFIG["max_daily_loss"] == 0.05
         assert RISK_CONFIG["default_stop_loss_pct"] == 0.02
         assert RISK_CONFIG["min_notional_usd"] == 5.0
         assert RISK_CONFIG["max_position_size_usd"] == 55.0
