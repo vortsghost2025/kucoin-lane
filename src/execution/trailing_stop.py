@@ -20,9 +20,9 @@ import time as _time
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TRAIL_PCT = 1.5
-DEFAULT_ACTIVATION_PCT = 1.0
-DEFAULT_STEP_PCT = 0.5
+DEFAULT_TRAIL_PCT = 1.5  # Trail 1.5% below HWM (holds ~2.3% at 3.8% peak)
+DEFAULT_ACTIVATION_PCT = 2.0  # Activate trailing at 2% (halfway to 3.8% TP)
+DEFAULT_STEP_PCT = 0.5  # Step size for ratchet increments
 
 
 class TrailingStopManager:
@@ -221,7 +221,7 @@ class ProgressiveROI:
 
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         cfg = config or {}
-        self.roi_table = cfg.get("roi_table", DEFAULT_ROI_TABLE)
+        self.roi_table = cfg.get("roi_table") or DEFAULT_ROI_TABLE
         # Sort by minutes ascending for lookup
         self._sorted_minutes = sorted(self.roi_table.keys())
 
@@ -267,7 +267,7 @@ class ProgressiveROI:
 
 # ── Custom Stop-Loss Callback ─────────────────────────────────────────────
 
-DEFAULT_BREAKEVEN_ACTIVATION_PCT = 0.5
+DEFAULT_BREAKEVEN_ACTIVATION_PCT = 1.0  # Move SL to entry at 1% profit (was 0.5%)
 
 
 class CustomStopLoss:

@@ -14,7 +14,7 @@ class TestTrailingStopManager:
     def mgr(self):
         return TrailingStopManager({
             "trail_pct": 1.5,
-            "activation_pct": 1.0,
+            "activation_pct": 2.0,
             "step_pct": 0.5,
         })
 
@@ -24,14 +24,14 @@ class TestTrailingStopManager:
 
     def test_defaults(self, default_mgr):
         assert default_mgr.trail_pct == 1.5
-        assert default_mgr.activation_pct == 1.0
+        assert default_mgr.activation_pct == 2.0
         assert default_mgr.step_pct == 0.5
 
     def test_no_trail_before_activation(self, mgr):
         result = mgr.update(
             trade_id=1,
             entry_price=100.0,
-            current_price=100.5,
+            current_price=101.0,
             original_sl=98.0,
             direction="long",
         )
@@ -42,7 +42,7 @@ class TestTrailingStopManager:
         result = mgr.update(
             trade_id=1,
             entry_price=100.0,
-            current_price=101.5,
+            current_price=102.5,
             original_sl=98.0,
             direction="long",
         )
@@ -50,7 +50,7 @@ class TestTrailingStopManager:
         assert result["stop_loss"] > 98.0
 
     def test_trail_ratchets_up(self, mgr):
-        mgr.update(1, 100.0, 101.5, 98.0, "long")
+        mgr.update(1, 100.0, 102.5, 98.0, "long")
         r1 = mgr.update(1, 100.0, 103.0, 98.0, "long")
         r2 = mgr.update(1, 100.0, 105.0, 98.0, "long")
         assert r2["stop_loss"] > r1["stop_loss"]
@@ -60,7 +60,7 @@ class TestTrailingStopManager:
         result = mgr.update(
             trade_id=2,
             entry_price=100.0,
-            current_price=101.0,
+            current_price=102.0,
             original_sl=98.0,
             direction="long",
         )
@@ -76,7 +76,7 @@ class TestTrailingStopManager:
         result = mgr.update(
             trade_id=3,
             entry_price=100.0,
-            current_price=102.0,
+            current_price=102.5,
             original_sl=98.0,
             direction="long",
             psar_value=100.5,
@@ -88,7 +88,7 @@ class TestTrailingStopManager:
         result = mgr.update(
             trade_id=4,
             entry_price=100.0,
-            current_price=102.0,
+            current_price=102.5,
             original_sl=98.0,
             direction="long",
             psar_value=95.0,
@@ -99,7 +99,7 @@ class TestTrailingStopManager:
         result = mgr.update(
             trade_id=5,
             entry_price=100.0,
-            current_price=98.5,
+            current_price=97.5,
             original_sl=102.0,
             direction="short",
         )
@@ -202,22 +202,22 @@ class TestProgressiveROI:
 class TestCustomStopLoss:
     @pytest.fixture
     def csl(self):
-        return CustomStopLoss({"breakeven_activation_pct": 0.5})
+        return CustomStopLoss({"breakeven_activation_pct": 1.0})
 
     @pytest.fixture
     def default_csl(self):
         return CustomStopLoss()
 
     def test_defaults(self, default_csl):
-        assert default_csl.breakeven_activation_pct == 0.5
+        assert default_csl.breakeven_activation_pct == 1.0
 
     def test_no_breakeven_below_threshold(self, csl):
-        result = csl.check(entry_price=100.0, current_price=100.3, original_sl=98.0)
+        result = csl.check(entry_price=100.0, current_price=100.5, original_sl=98.0)
         assert result["breakeven_active"] is False
         assert result["stop_loss"] == 98.0
 
     def test_breakeven_activates(self, csl):
-        result = csl.check(entry_price=100.0, current_price=100.6, original_sl=98.0)
+        result = csl.check(entry_price=100.0, current_price=101.1, original_sl=98.0)
         assert result["breakeven_active"] is True
         assert result["stop_loss"] == 100.0
 
@@ -232,7 +232,7 @@ class TestCustomStopLoss:
 
     def test_short_breakeven(self, csl):
         result = csl.check(
-            entry_price=100.0, current_price=99.4, original_sl=102.0, direction="short"
+            entry_price=100.0, current_price=98.8, original_sl=102.0, direction="short"
         )
         assert result["breakeven_active"] is True
         assert result["stop_loss"] == 100.0

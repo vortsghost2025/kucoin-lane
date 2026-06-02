@@ -36,6 +36,18 @@ class TestConfigModule:
         assert EXECUTION_CONFIG["paper_trading"] is True
         assert EXECUTION_CONFIG["max_open_positions"] == 2
 
+    def test_execution_config_trailing_stop_defaults(self):
+        from src.config import EXECUTION_CONFIG
+        ts = EXECUTION_CONFIG["trailing_stop_config"]
+        assert ts["activation_pct"] == 2.0
+        assert ts["trail_pct"] == 1.5
+        assert ts["step_pct"] == 0.5
+
+    def test_execution_config_custom_stoploss_defaults(self):
+        from src.config import EXECUTION_CONFIG
+        cs = EXECUTION_CONFIG["custom_stoploss_config"]
+        assert cs["breakeven_activation_pct"] == 1.0
+
     def test_module_level_aliases(self):
         from src.config import (
             KUCOIN_API_KEY, KUCOIN_API_SECRET, KUCOIN_API_PASSPHRASE,

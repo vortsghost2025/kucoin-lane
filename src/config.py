@@ -248,6 +248,17 @@ EXECUTION_CONFIG = {
     "paper_trading": os.getenv("PAPER_TRADING", "true").lower() == "true",
     "spot_long_only": SPOT_LONG_ONLY,
     "max_open_positions": int(os.getenv("MAX_OPEN_POSITIONS", "2")),
+    "trailing_stop_config": {
+        "activation_pct": float(os.getenv("TRAILING_ACTIVATION_PCT", "2.0")),
+        "trail_pct": float(os.getenv("TRAILING_PCT", "1.5")),
+        "step_pct": float(os.getenv("TRAILING_STEP_PCT", "0.5")),
+    },
+    "progressive_roi_config": {
+        "roi_table": None,  # Uses DEFAULT_ROI_TABLE from trailing_stop.py
+    },
+    "custom_stoploss_config": {
+        "breakeven_activation_pct": float(os.getenv("BREAKEVEN_ACTIVATION_PCT", "1.0")),
+    },
 }
 
 ENTRY_TIMING_CONFIG = {

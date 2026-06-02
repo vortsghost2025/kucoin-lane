@@ -38,6 +38,7 @@ from ..config import (
     DRY_RUN,
     LIVE_TRADING,
     SPOT_LONG_ONLY,
+    EXECUTION_CONFIG,
 )
 from .exchange_adapter import ExchangeAdapter, KuCoinAdapter
 from ..risk.circuit_breaker import CircuitBreaker
@@ -1263,6 +1264,9 @@ def select_executor(dry_run: bool, live_trading: bool) -> ExecutionEngine:
         "min_signal_strength": float(os.getenv("MIN_SIGNAL_STRENGTH", "0.30")),
         "min_win_rate": float(os.getenv("MIN_WIN_RATE", "0.45")),
         "default_stop_loss_pct": float(os.getenv("DEFAULT_STOP_LOSS_PCT", "0.02")),
+        "trailing_stop_config": EXECUTION_CONFIG.get("trailing_stop_config"),
+        "progressive_roi_config": EXECUTION_CONFIG.get("progressive_roi_config"),
+        "custom_stoploss_config": EXECUTION_CONFIG.get("custom_stoploss_config"),
     }
 
     if dry_run:
