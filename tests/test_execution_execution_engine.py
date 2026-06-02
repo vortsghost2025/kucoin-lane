@@ -11,11 +11,36 @@ from src.execution.execution_engine import (
     TradeStatus,
     select_executor,
 )
+from src.execution.trailing_stop import TrailingStopManager, ProgressiveROI, CustomStopLoss
 
 
 class ConcreteEngine(ExecutionEngine):
     def run_cycle(self):
         pass
+
+
+def _patch_engine_attrs(engine, extra=None):
+    """Set minimum attrs on __new__-created engines so tests work."""
+    base = {
+        "config": {},
+        "heartbeat_file": "",
+        "start_time": datetime.now(),
+        "cycle_count": 0,
+        "is_running": True,
+        "open_positions": [],
+        "closed_trades": [],
+        "total_trades": 0,
+        "winning_trades": 0,
+        "losing_trades": 0,
+        "portfolio_cb": None,
+        "trailing_stop": TrailingStopManager(),
+        "progressive_roi": ProgressiveROI(),
+        "custom_stoploss": CustomStopLoss(),
+        "_last_runtime_status": "initializing",
+    }
+    if extra:
+        base.update(extra)
+    engine.__dict__.update(base)
 
 
 class TestTradeStatus:
@@ -33,31 +58,13 @@ class TestExecutionEngine:
 
     def test_init(self, config):
         engine = ConcreteEngine.__new__(ConcreteEngine)
-        engine.__dict__["config"] = config
-        engine.__dict__["heartbeat_file"] = "bot_heartbeat_dry_run.json"
-        engine.__dict__["start_time"] = datetime.now()
-        engine.__dict__["cycle_count"] = 0
-        engine.__dict__["is_running"] = True
-        engine.__dict__["open_positions"] = []
-        engine.__dict__["closed_trades"] = []
-        engine.__dict__["total_trades"] = 0
-        engine.__dict__["winning_trades"] = 0
-        engine.__dict__["losing_trades"] = 0
+        _patch_engine_attrs(engine, {"config": config, "heartbeat_file": "bot_heartbeat_dry_run.json"})
         assert engine.cycle_count == 0
         assert engine.is_running is True
 
     def test_write_heartbeat(self, config, tmp_path):
         engine = ConcreteEngine.__new__(ConcreteEngine)
-        engine.__dict__["config"] = config
-        engine.__dict__["heartbeat_file"] = str(tmp_path / "heartbeat.json")
-        engine.__dict__["start_time"] = datetime.now()
-        engine.__dict__["cycle_count"] = 1
-        engine.__dict__["is_running"] = True
-        engine.__dict__["open_positions"] = []
-        engine.__dict__["closed_trades"] = []
-        engine.__dict__["total_trades"] = 0
-        engine.__dict__["winning_trades"] = 0
-        engine.__dict__["losing_trades"] = 0
+        _patch_engine_attrs(engine, {"heartbeat_file": str(tmp_path / "heartbeat.json"), "cycle_count": 1})
         engine.write_heartbeat("testing", "test_step")
         with open(engine.heartbeat_file) as f:
             data = json.load(f)
@@ -67,32 +74,15 @@ class TestExecutionEngine:
 
     def test_get_total_pnl(self, config):
         engine = ConcreteEngine.__new__(ConcreteEngine)
-        engine.__dict__["config"] = config
-        engine.__dict__["heartbeat_file"] = ""
-        engine.__dict__["start_time"] = datetime.now()
-        engine.__dict__["cycle_count"] = 0
-        engine.__dict__["is_running"] = True
-        engine.__dict__["open_positions"] = []
-        engine.__dict__["closed_trades"] = [{"pnl": 100}, {"pnl": -50}]
-        engine.__dict__["total_trades"] = 2
-        engine.__dict__["winning_trades"] = 1
-        engine.__dict__["losing_trades"] = 1
+        _patch_engine_attrs(engine, {"closed_trades": [{"pnl": 100}, {"pnl": -50}], "total_trades": 2, "winning_trades": 1, "losing_trades": 1})
         assert engine._get_total_pnl() == 50
 
     def test_close_position(self, config):
         engine = ConcreteEngine.__new__(ConcreteEngine)
-        engine.__dict__["config"] = config
-        engine.__dict__["heartbeat_file"] = ""
-        engine.__dict__["start_time"] = datetime.now()
-        engine.__dict__["cycle_count"] = 0
-        engine.__dict__["is_running"] = True
-        engine.__dict__["open_positions"] = [
-            {"trade_id": 1, "pair": "SOL/USDT", "entry_price": 100.0, "position_size": 1.0},
-        ]
-        engine.__dict__["closed_trades"] = []
-        engine.__dict__["total_trades"] = 1
-        engine.__dict__["winning_trades"] = 0
-        engine.__dict__["losing_trades"] = 0
+        _patch_engine_attrs(engine, {
+            "open_positions": [{"trade_id": 1, "pair": "SOL/USDT", "entry_price": 100.0, "position_size": 1.0}],
+            "total_trades": 1, "winning_trades": 0, "losing_trades": 0,
+        })
         result = engine.close_position(1, 110.0, "take_profit")
         assert result["exit_reason"] == "take_profit"
         assert result["pnl"] == 10.0
@@ -102,66 +92,31 @@ class TestExecutionEngine:
 
     def test_update_open_positions_stop_loss(self, config):
         engine = ConcreteEngine.__new__(ConcreteEngine)
-        engine.__dict__["config"] = config
-        engine.__dict__["heartbeat_file"] = ""
-        engine.__dict__["start_time"] = datetime.now()
-        engine.__dict__["cycle_count"] = 0
-        engine.__dict__["is_running"] = True
-        engine.__dict__["open_positions"] = [
-            {
-                "trade_id": 1,
-                "pair": "SOL/USDT",
-                "entry_price": 100.0,
-                "position_size": 1.0,
-                "stop_loss": 95.0,
-                "take_profit": 110.0,
-            },
-        ]
-        engine.__dict__["closed_trades"] = []
-        engine.__dict__["total_trades"] = 1
-        engine.__dict__["winning_trades"] = 0
-        engine.__dict__["losing_trades"] = 0
+        _patch_engine_attrs(engine, {
+            "open_positions": [
+                {"trade_id": 1, "pair": "SOL/USDT", "entry_price": 100.0, "position_size": 1.0, "stop_loss": 95.0, "take_profit": 110.0},
+            ],
+            "total_trades": 1, "winning_trades": 0, "losing_trades": 0,
+        })
         closed = engine.update_open_positions({"SOL/USDT": 94.0})
         assert len(closed) == 1
         assert closed[0]["exit_reason"] == "stop_loss"
 
     def test_update_open_positions_take_profit(self, config):
         engine = ConcreteEngine.__new__(ConcreteEngine)
-        engine.__dict__["config"] = config
-        engine.__dict__["heartbeat_file"] = ""
-        engine.__dict__["start_time"] = datetime.now()
-        engine.__dict__["cycle_count"] = 0
-        engine.__dict__["is_running"] = True
-        engine.__dict__["open_positions"] = [
-            {
-                "trade_id": 1,
-                "pair": "SOL/USDT",
-                "entry_price": 100.0,
-                "position_size": 1.0,
-                "stop_loss": 95.0,
-                "take_profit": 110.0,
-            },
-        ]
-        engine.__dict__["closed_trades"] = []
-        engine.__dict__["total_trades"] = 1
-        engine.__dict__["winning_trades"] = 0
-        engine.__dict__["losing_trades"] = 0
+        _patch_engine_attrs(engine, {
+            "open_positions": [
+                {"trade_id": 1, "pair": "SOL/USDT", "entry_price": 100.0, "position_size": 1.0, "stop_loss": 95.0, "take_profit": 110.0},
+            ],
+            "total_trades": 1, "winning_trades": 0, "losing_trades": 0,
+        })
         closed = engine.update_open_positions({"SOL/USDT": 111.0})
         assert len(closed) == 1
         assert closed[0]["exit_reason"] == "take_profit"
 
     def test_get_performance_summary_no_trades(self, config):
         engine = ConcreteEngine.__new__(ConcreteEngine)
-        engine.__dict__["config"] = config
-        engine.__dict__["heartbeat_file"] = ""
-        engine.__dict__["start_time"] = datetime.now()
-        engine.__dict__["cycle_count"] = 0
-        engine.__dict__["is_running"] = True
-        engine.__dict__["open_positions"] = []
-        engine.__dict__["closed_trades"] = []
-        engine.__dict__["total_trades"] = 0
-        engine.__dict__["winning_trades"] = 0
-        engine.__dict__["losing_trades"] = 0
+        _patch_engine_attrs(engine)
         summary = engine.get_performance_summary()
         assert summary["total_trades"] == 0
         assert summary["win_rate"] == 0
@@ -171,16 +126,7 @@ class TestExecutionEngine:
 
     def test_get_open_positions_returns_copy(self, config):
         engine = ConcreteEngine.__new__(ConcreteEngine)
-        engine.__dict__["config"] = config
-        engine.__dict__["heartbeat_file"] = ""
-        engine.__dict__["start_time"] = datetime.now()
-        engine.__dict__["cycle_count"] = 0
-        engine.__dict__["is_running"] = True
-        engine.__dict__["open_positions"] = [{"trade_id": 1}]
-        engine.__dict__["closed_trades"] = []
-        engine.__dict__["total_trades"] = 0
-        engine.__dict__["winning_trades"] = 0
-        engine.__dict__["losing_trades"] = 0
+        _patch_engine_attrs(engine, {"open_positions": [{"trade_id": 1}]})
         result = engine.get_open_positions()
         assert len(result) == 1
         result.append({"trade_id": 2})
@@ -257,22 +203,11 @@ class TestLiveExecutor:
 
     def test_validate_live_trade_position_exceeds_balance(self, config):
         executor = LiveExecutor.__new__(LiveExecutor)
-        executor.__dict__["config"] = config
-        executor.__dict__["heartbeat_file"] = ""
-        executor.__dict__["start_time"] = datetime.now()
-        executor.__dict__["cycle_count"] = 0
-        executor.__dict__["is_running"] = True
-        executor.__dict__["open_positions"] = []
-        executor.__dict__["closed_trades"] = []
-        executor.__dict__["total_trades"] = 0
-        executor.__dict__["winning_trades"] = 0
-        executor.__dict__["losing_trades"] = 0
-        executor.max_open_positions = 3
-        executor.max_position_size_usd = 10000
-        executor.max_trade_loss_usd = 500
-        executor.max_daily_loss_usd = 2000
-        executor.min_balance_usd = 100
-        executor.order_type = "market"
+        _patch_engine_attrs(executor, {
+            "max_open_positions": 3, "max_position_size_usd": 10000,
+            "max_trade_loss_usd": 500, "max_daily_loss_usd": 2000,
+            "min_balance_usd": 100, "order_type": "market",
+        })
         reason = executor._validate_live_trade(
             entry_price=100.0, position_size=100.0, stop_loss=90.0, account_balance=5000.0
         )
@@ -282,22 +217,13 @@ class TestLiveExecutor:
 
     def test_validate_live_trade_max_positions(self, config):
         executor = LiveExecutor.__new__(LiveExecutor)
-        executor.__dict__["config"] = config
-        executor.__dict__["heartbeat_file"] = ""
-        executor.__dict__["start_time"] = datetime.now()
-        executor.__dict__["cycle_count"] = 0
-        executor.__dict__["is_running"] = True
-        executor.__dict__["open_positions"] = [{"trade_id": 1}, {"trade_id": 2}, {"trade_id": 3}]
-        executor.__dict__["closed_trades"] = []
-        executor.__dict__["total_trades"] = 3
-        executor.__dict__["winning_trades"] = 0
-        executor.__dict__["losing_trades"] = 0
-        executor.max_open_positions = 3
-        executor.max_position_size_usd = 10000
-        executor.max_trade_loss_usd = 500
-        executor.max_daily_loss_usd = 2000
-        executor.min_balance_usd = 100
-        executor.order_type = "market"
+        _patch_engine_attrs(executor, {
+            "open_positions": [{"trade_id": 1}, {"trade_id": 2}, {"trade_id": 3}],
+            "total_trades": 3,
+            "max_open_positions": 3, "max_position_size_usd": 10000,
+            "max_trade_loss_usd": 500, "max_daily_loss_usd": 2000,
+            "min_balance_usd": 100, "order_type": "market",
+        })
         reason = executor._validate_live_trade(
             entry_price=100.0, position_size=1.0, stop_loss=90.0, account_balance=5000.0
         )
@@ -306,22 +232,11 @@ class TestLiveExecutor:
 
     def test_validate_live_trade_passes(self, config):
         executor = LiveExecutor.__new__(LiveExecutor)
-        executor.__dict__["config"] = config
-        executor.__dict__["heartbeat_file"] = ""
-        executor.__dict__["start_time"] = datetime.now()
-        executor.__dict__["cycle_count"] = 0
-        executor.__dict__["is_running"] = True
-        executor.__dict__["open_positions"] = []
-        executor.__dict__["closed_trades"] = []
-        executor.__dict__["total_trades"] = 0
-        executor.__dict__["winning_trades"] = 0
-        executor.__dict__["losing_trades"] = 0
-        executor.max_open_positions = 3
-        executor.max_position_size_usd = 10000
-        executor.max_trade_loss_usd = 500
-        executor.max_daily_loss_usd = 2000
-        executor.min_balance_usd = 100
-        executor.order_type = "market"
+        _patch_engine_attrs(executor, {
+            "max_open_positions": 3, "max_position_size_usd": 10000,
+            "max_trade_loss_usd": 500, "max_daily_loss_usd": 2000,
+            "min_balance_usd": 100, "order_type": "market",
+        })
         reason = executor._validate_live_trade(
             entry_price=100.0, position_size=0.1, stop_loss=95.0, account_balance=5000.0
         )
@@ -329,16 +244,7 @@ class TestLiveExecutor:
 
     def test_execute_no_approval(self, config):
         executor = LiveExecutor.__new__(LiveExecutor)
-        executor.__dict__["config"] = config
-        executor.__dict__["heartbeat_file"] = ""
-        executor.__dict__["start_time"] = datetime.now()
-        executor.__dict__["cycle_count"] = 0
-        executor.__dict__["is_running"] = True
-        executor.__dict__["open_positions"] = []
-        executor.__dict__["closed_trades"] = []
-        executor.__dict__["total_trades"] = 0
-        executor.__dict__["winning_trades"] = 0
-        executor.__dict__["losing_trades"] = 0
+        _patch_engine_attrs(executor)
         result = executor.execute({
             "position_approved": False, "risk_approved": False,
         })

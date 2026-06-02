@@ -48,6 +48,56 @@ class TestMarketAnalysisAgent:
         assert 0 <= agent._calculate_rsi_simple(1000) <= 100
         assert 0 <= agent._calculate_rsi_simple(-1000) <= 100
 
+    def test_calculate_rsi_welder_insufficient_data(self, agent):
+        assert agent.calculate_rsi([100.0], 14) is None
+        assert agent.calculate_rsi([], 14) is None
+        assert agent.calculate_rsi([100.0] * 5, 14) is None
+
+    def test_calculate_rsi_welder_all_gains(self, agent):
+        closes = [100.0 + i for i in range(20)]
+        rsi = agent.calculate_rsi(closes, 14)
+        assert rsi is not None
+        assert rsi == 100.0
+
+    def test_calculate_rsi_welder_all_losses(self, agent):
+        closes = [100.0 - i for i in range(20)]
+        rsi = agent.calculate_rsi(closes, 14)
+        assert rsi is not None
+        assert rsi == 0.0
+
+    def test_calculate_rsi_welder_mixed(self, agent):
+        closes = [100.0, 101.0, 99.0, 102.0, 98.0, 103.0, 97.0,
+                  104.0, 96.0, 105.0, 95.0, 106.0, 94.0, 107.0,
+                  93.0, 108.0, 92.0, 109.0, 91.0, 110.0]
+        rsi = agent.calculate_rsi(closes, 14)
+        assert rsi is not None
+        assert 0 < rsi < 100
+
+    def test_calculate_rsi_welder_flat(self, agent):
+        closes = [100.0] * 20
+        rsi = agent.calculate_rsi(closes, 14)
+        assert rsi is not None
+        assert rsi == 50.0
+
+    def test_calculate_rsi_with_closes_data(self, agent):
+        data = {
+            "current_price": 100.0,
+            "price_change_24h_pct": 5.0,
+            "volume_24h": 1000000.0,
+            "closes": [100.0 + i for i in range(20)],
+        }
+        rsi = agent._calculate_rsi(data)
+        assert rsi == 100.0
+
+    def test_calculate_rsi_fallback_no_closes(self, agent):
+        data = {
+            "current_price": 100.0,
+            "price_change_24h_pct": 5.0,
+            "volume_24h": 1000000.0,
+        }
+        rsi = agent._calculate_rsi(data)
+        assert rsi == 50.5
+
     def test_calculate_macd_simple(self, agent):
         assert agent._calculate_macd_simple(5.0) == 10.0
         assert agent._calculate_macd_simple(-3.0) == -6.0

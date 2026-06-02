@@ -205,8 +205,8 @@ RISK_CONFIG = {
     == "true",
     "min_position_size_units": float(os.getenv("MIN_POSITION_SIZE_UNITS", "0.01")),
     "min_position_size_by_pair": {
-        "BTC/USDT": float(os.getenv("MIN_SIZE_BTC", "0.0001")),
-        "ETH/USDT": float(os.getenv("MIN_SIZE_ETH", "0.001")),
+        "BTC/USDT": float(os.getenv("MIN_SIZE_BTC", "0.00001")),
+        "ETH/USDT": float(os.getenv("MIN_SIZE_ETH", "0.0001")),
         "AVAX/USDT": float(os.getenv("MIN_SIZE_AVAX", "0.01")),
         "DOGE/USDT": float(os.getenv("MIN_SIZE_DOGE", "1.0")),
         "LINK/USDT": float(os.getenv("MIN_SIZE_LINK", "0.1")),

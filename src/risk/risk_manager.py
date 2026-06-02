@@ -346,7 +346,10 @@ class RiskManagementAgent(BaseAgent):
         )
 
         if current_regime == "sideways":
-            adjusted_min_signal_strength = max(adjusted_min_signal_strength, 0.45)
+            # Micro-account friendly: 0.35 floor (down from 0.45)
+            # At $110, we need to catch smaller edges; the edge_gate.py
+            # already filters trades that can't clear round-trip friction.
+            adjusted_min_signal_strength = max(adjusted_min_signal_strength, 0.35)
 
         if current_regime == "sideways":
             stop_loss_pct = self.default_stop_loss_pct * stop_loss_adjustment
@@ -462,24 +465,36 @@ class RiskManagementAgent(BaseAgent):
             not self.enforce_min_position_size_only
             and actual_risk_amount > max_risk_amount
         ):
-            return {
-                "pair": pair,
-                "current_price": current_price,
-                "position_size": 0,
-                "position_size_usd": 0,
-                "stop_loss": stop_loss,
-                "take_profit": 0,
-                "stop_loss_pct": stop_loss_pct * 100,
-                "take_profit_pct": 0,
-                "risk_amount": actual_risk_amount,
-                "risk_pct_of_account": (actual_risk_amount / self.account_balance)
-                * 100,
-                "signal_strength": signal_strength,
-                "backtest_win_rate": backtest_win_rate,
-                "position_approved": False,
-                "rejection_reason": "Position size exceeds max risk per trade",
-                "risk_reward_ratio": 0,
-            }
+            # Allow up to 2x max risk when position was bumped to
+            # exchange minimum size — we can't trade less than the
+            # exchange requires.  Reject only if risk exceeds 2x cap.
+            was_bumped = min_size_units > 0 and position_size <= min_size_units * 1.01
+            risk_ratio = actual_risk_amount / max_risk_amount if max_risk_amount > 0 else 999
+            if was_bumped and risk_ratio <= 2.0:
+                self.logger.info(
+                    f"{pair}: min-size bump to {position_size:.6f} causes risk "
+                    f"${actual_risk_amount:.2f} to exceed cap ${max_risk_amount:.2f} "
+                    f"({risk_ratio:.1f}x) — allowing (exchange minimum)"
+                )
+            else:
+                return {
+                    "pair": pair,
+                    "current_price": current_price,
+                    "position_size": 0,
+                    "position_size_usd": 0,
+                    "stop_loss": stop_loss,
+                    "take_profit": 0,
+                    "stop_loss_pct": stop_loss_pct * 100,
+                    "take_profit_pct": 0,
+                    "risk_amount": actual_risk_amount,
+                    "risk_pct_of_account": (actual_risk_amount / self.account_balance)
+                    * 100,
+                    "signal_strength": signal_strength,
+                    "backtest_win_rate": backtest_win_rate,
+                    "position_approved": False,
+                    "rejection_reason": "Position size exceeds max risk per trade",
+                    "risk_reward_ratio": 0,
+                }
 
         take_profit_pct = stop_loss_pct * self.min_risk_reward_ratio
         if is_short:

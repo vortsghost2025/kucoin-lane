@@ -43,6 +43,7 @@ from .exchange_adapter import ExchangeAdapter, KuCoinAdapter
 from ..risk.circuit_breaker import CircuitBreaker
 from ..risk.portfolio_circuit_breaker import PortfolioCircuitBreaker, CircuitBreakTriggered
 from ..utils.timeframe import resolve_timeframe, DEFAULT_TIMEFRAME
+from .trailing_stop import TrailingStopManager, ProgressiveROI, CustomStopLoss
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,9 @@ class ExecutionEngine(ABC):
         self.winning_trades = 0
         self.losing_trades = 0
         self.portfolio_cb = None
+        self.trailing_stop = TrailingStopManager(config.get("trailing_stop_config"))
+        self.progressive_roi = ProgressiveROI(config.get("progressive_roi_config"))
+        self.custom_stoploss = CustomStopLoss(config.get("custom_stoploss_config"))
         self._last_runtime_status: str = "initializing"
         logger.info(
             f"ExecutionEngine initialized - using heartbeat: {self.heartbeat_file}"
@@ -399,29 +403,74 @@ class ExecutionEngine(ABC):
             if pair not in current_prices:
                 continue
 
-        current_price = current_prices[pair]
-        direction = trade.get("direction", "long")
-        if direction == "short":
-            pnl = (trade["entry_price"] - current_price) * trade["position_size"]
-            pnl_pct = (trade["entry_price"] - current_price) / trade["entry_price"] * 100
-        else:
-            pnl = (current_price - trade["entry_price"]) * trade["position_size"]
-            pnl_pct = (current_price - trade["entry_price"]) / trade["entry_price"] * 100
-        trade["pnl"] = pnl
-        trade["pnl_pct"] = pnl_pct
+            current_price = current_prices[pair]
+            direction = trade.get("direction", "long")
+            if direction == "short":
+                pnl = (trade["entry_price"] - current_price) * trade["position_size"]
+                pnl_pct = (trade["entry_price"] - current_price) / trade["entry_price"] * 100
+            else:
+                pnl = (current_price - trade["entry_price"]) * trade["position_size"]
+                pnl_pct = (current_price - trade["entry_price"]) / trade["entry_price"] * 100
+            trade["pnl"] = pnl
+            trade["pnl_pct"] = pnl_pct
 
-        if direction == "short":
-            if current_price >= trade["stop_loss"]:
-                trades_to_close.append((trade["trade_id"], current_price, "stop_loss"))
-            elif current_price <= trade["take_profit"]:
-                trades_to_close.append((trade["trade_id"], current_price, "take_profit"))
-        else:
-            if current_price <= trade["stop_loss"]:
-                trades_to_close.append((trade["trade_id"], current_price, "stop_loss"))
-            elif current_price >= trade["take_profit"]:
-                trades_to_close.append((trade["trade_id"], current_price, "take_profit"))
+            # ── Custom stoploss: move SL to break-even if profit ≥ threshold ──
+            original_sl = trade["stop_loss"]
+            be_result = self.custom_stoploss.check(
+                entry_price=trade["entry_price"],
+                current_price=current_price,
+                original_sl=original_sl,
+                direction=direction,
+            )
+            trade["breakeven_active"] = be_result["breakeven_active"]
+            trade["unrealized_pct"] = be_result["unrealized_pct"]
+            sl_after_breakeven = be_result["stop_loss"]
+
+            # ── Trailing stop: ratchet SL upward as price advances ──
+            psar_val = trade.get("psar_value")
+            trail_result = self.trailing_stop.update(
+                trade_id=trade["trade_id"],
+                entry_price=trade["entry_price"],
+                current_price=current_price,
+                original_sl=sl_after_breakeven,
+                direction=direction,
+                psar_value=psar_val,
+            )
+            effective_sl = trail_result["stop_loss"]
+            trade["effective_stop_loss"] = effective_sl
+            trade["trailing_active"] = trail_result["trailing_active"]
+            trade["high_water"] = trail_result["high_water"]
+
+            # ── Progressive ROI: time-based TP that tightens over time ──
+            entry_time_iso = trade.get("entry_time", "")
+            roi_exit, current_pct, target_pct, minutes_held = self.progressive_roi.check(
+                entry_time_iso=entry_time_iso,
+                current_price=current_price,
+                entry_price=trade["entry_price"],
+            )
+            trade["roi_target_pct"] = target_pct
+            trade["minutes_held"] = minutes_held
+
+            # ── Exit logic ──
+            if direction == "short":
+                if current_price >= effective_sl:
+                    reason = "trailing_stop" if trail_result["trailing_active"] else "stop_loss"
+                    trades_to_close.append((trade["trade_id"], current_price, reason))
+                elif current_price <= trade["take_profit"]:
+                    trades_to_close.append((trade["trade_id"], current_price, "take_profit"))
+                elif roi_exit:
+                    trades_to_close.append((trade["trade_id"], current_price, "progressive_roi"))
+            else:
+                if current_price <= effective_sl:
+                    reason = "trailing_stop" if trail_result["trailing_active"] else "stop_loss"
+                    trades_to_close.append((trade["trade_id"], current_price, reason))
+                elif current_price >= trade["take_profit"]:
+                    trades_to_close.append((trade["trade_id"], current_price, "take_profit"))
+                elif roi_exit:
+                    trades_to_close.append((trade["trade_id"], current_price, "progressive_roi"))
 
         for trade_id, exit_price, reason in trades_to_close:
+            self.trailing_stop.remove(trade_id)
             closed = self.close_position(trade_id, exit_price, reason)
             closed_trades.append(closed)
 

@@ -1,0 +1,157 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "StrategyCandidate",
+  "description": "Standardized description of a trading strategy candidate for evaluation.",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "source_repo",
+    "indicators",
+    "timeframe",
+    "trade_frequency",
+    "fee_aware",
+    "fee_handling_notes",
+    "micro_account_suitable",
+    "min_capital_usd",
+    "risk_reward_ratio",
+    "max_drawdown_pct",
+    "spot_long_only_compatible",
+    "score",
+    "verdict",
+    "implementation_notes"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique identifier for the strategy (e.g. psar-trailing-stop)."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable strategy name."
+    },
+    "source_repo": {
+      "type": "string",
+      "description": "Repository or origin (e.g. freqtrade-strategies, freqtrade, kucoin-lane)."
+    },
+    "source_file": {
+      "type": "string",
+      "description": "Source file path or URL where the strategy was found."
+    },
+    "indicators": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "List of indicators used by the strategy."
+    },
+    "timeframe": {
+      "type": "string",
+      "description": "Primary timeframe for signal generation (e.g. 1h, 4h)."
+    },
+    "trade_frequency": {
+      "type": "string",
+      "enum": [
+        "very_low",
+        "low",
+        "medium",
+        "high"
+      ],
+      "description": "Expected trade frequency."
+    },
+    "fee_aware": {
+      "type": "boolean",
+      "description": "Whether the strategy explicitly accounts for fees or minimizes round-trip friction."
+    },
+    "fee_handling_notes": {
+      "type": "string",
+      "description": "How the strategy handles fees."
+    },
+    "micro_account_suitable": {
+      "type": "boolean",
+      "description": "Whether the strategy is suitable for a $110 micro-account."
+    },
+    "min_capital_usd": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Minimum capital required in USD."
+    },
+    "risk_reward_ratio": {
+      "type": "string",
+      "description": "Target risk/reward ratio (e.g. 1:2)."
+    },
+    "max_drawdown_pct": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "description": "Maximum historical drawdown percentage."
+    },
+    "spot_long_only_compatible": {
+      "type": "boolean",
+      "description": "Whether the strategy is compatible with SPOT LONG-ONLY trading."
+    },
+    "score": {
+      "type": "object",
+      "description": "Scored evaluation using the matrix rubric.",
+      "required": [
+        "fee_awareness",
+        "micro_account_suitability",
+        "signal_quality",
+        "risk_management",
+        "simplicity",
+        "weighted_total"
+      ],
+      "properties": {
+        "fee_awareness": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "micro_account_suitability": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "signal_quality": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "risk_management": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "simplicity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "weighted_total": {
+          "type": "number",
+          "description": "Calculated weighted score (max 5.00)."
+        }
+      }
+    },
+    "verdict": {
+      "type": "string",
+      "enum": [
+        "ADOPT",
+        "EVALUATE",
+        "SKIP"
+      ],
+      "description": "Decision recommendation."
+    },
+    "implementation_notes": {
+      "type": "string",
+      "description": "Notes on implementing or tuning the strategy."
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Key risks or caveats."
+    }
+  }
+}

@@ -62,3 +62,6 @@ venv/
 paper_trades_ledger.json
 paper_trades_ledger_report.txt
 paper_trades_ledger_sim_config.json
+
+# External research repos (never commit cloned code)
+external/
