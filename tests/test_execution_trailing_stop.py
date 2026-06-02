@@ -156,17 +156,17 @@ class TestProgressiveROI:
         assert roi.roi_table == DEFAULT_ROI_TABLE
 
     def test_get_target_at_entry(self, roi):
-        assert roi.get_target_pct(0) == 5.0
+        assert roi.get_target_pct(0) == 6.0
 
     def test_get_target_at_30_min(self, roi):
-        assert roi.get_target_pct(30) == 2.0
+        assert roi.get_target_pct(30) == 4.0
 
     def test_get_target_at_240_min(self, roi):
-        assert roi.get_target_pct(240) == 0.35
+        assert roi.get_target_pct(240) == 1.0
 
     def test_get_target_between_steps(self, roi):
-        # 45 min: between 30→2.0% and 60→1.0%, should use 2.0%
-        assert roi.get_target_pct(45) == 2.0
+        # 45 min: between 30→4.0% and 60→3.0%, should use 4.0%
+        assert roi.get_target_pct(45) == 4.0
 
     def test_custom_table(self, custom_roi):
         assert custom_roi.get_target_pct(0) == 3.0
@@ -179,15 +179,15 @@ class TestProgressiveROI:
         assert should_exit is False
 
     def test_check_exit_after_long_hold(self, roi):
-        # Entry 3 hours ago — need 0.5%, price is +1.0%
-        entry_time = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+        # Entry 5 hours ago — need 1.0%, price is +1.5%
+        entry_time = (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat()
         should_exit, current_pct, target_pct, minutes = roi.check(
-            entry_time, 101.0, 100.0
+            entry_time, 101.5, 100.0
         )
         assert should_exit is True
-        assert current_pct == pytest.approx(1.0, abs=0.01)
-        assert target_pct == 0.5
-        assert minutes >= 120
+        assert current_pct == pytest.approx(1.5, abs=0.01)
+        assert target_pct == 1.0
+        assert minutes >= 240
 
     def test_check_invalid_entry_time(self, roi):
         should_exit, _, _, _ = roi.check("not-a-date", 101.0, 100.0)

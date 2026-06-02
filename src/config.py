@@ -192,7 +192,7 @@ TRADING_CONFIG = {
 
 RISK_CONFIG = {
     "risk_per_trade": float(os.getenv("RISK_PER_TRADE", "0.01")),
-    "min_risk_reward_ratio": float(os.getenv("MIN_RISK_REWARD_RATIO", "1.2")),
+    "min_risk_reward_ratio": float(os.getenv("MIN_RISK_REWARD_RATIO", "2.0")),
     "max_daily_loss": float(os.getenv("MAX_DAILY_LOSS", "0.03")),
     "account_balance": float(os.getenv("ACCOUNT_BALANCE", "110")),
     "min_signal_strength": float(os.getenv("MIN_SIGNAL_STRENGTH", "0.30")),

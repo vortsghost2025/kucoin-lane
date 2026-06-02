@@ -188,25 +188,29 @@ class TrailingStopManager:
 # ── Progressive ROI Table ────────────────────────────────────────────────
 
 # Default ROI table: {minutes_since_entry: profit_pct}
-# Tightens over time — after 40 min, 0.5% profit is enough to close.
-# After 120 min, even 0.35% (just clearing friction) triggers exit.
-# This prevents holding dead positions that bleed via opportunity cost.
+# With R:R=2.0, TP targets are ~3.8% (BTC) / ~4.8% (ETH).
+# The table starts high to let trades reach their TP naturally,
+# then steps down gradually to exit stalled positions.
+# Never drops below friction (0.35%) — even dead positions must clear fees.
 DEFAULT_ROI_TABLE: Dict[int, float] = {
-    0: 5.0,    # Immediate: need 5% (unreachable = no instant exits)
-    10: 3.0,   # 10 min: need 3%
-    30: 2.0,   # 30 min: need 2%
-    60: 1.0,   # 1 hour: need 1%
-    120: 0.5,  # 2 hours: need 0.5%
-    240: 0.35, # 4 hours: need 0.35% (just clears friction)
+    0: 6.0,   # Immediate: need 6% (unreachable = no instant exits)
+   10: 5.0,   # 10 min: need 5% — let the trade breathe
+   30: 4.0,   # 30 min: need 4% — aligns with R:R=2.0 TP target
+   60: 3.0,   # 1 hour: need 3% — still above breakeven after fees
+  120: 2.0,   # 2 hours: need 2% — solid profit after 0.35% friction
+  240: 1.0,   # 4 hours: need 1% — trade stalled, take what's left
+  480: 0.5,   # 8 hours: need 0.5% — dead position, free capital
+  720: 0.35,  # 12 hours: just clear friction — stop holding dead weight
 }
 
 
 class ProgressiveROI:
     """Time-based take-profit table that tightens as position ages.
 
-    At $110 capital with 0.35% minimum friction, a 2% TP may never fill
-    if the move stalls. Progressive ROI solves this: the longer you hold,
-    the lower the profit threshold needed to close the position.
+    At $110 capital with R:R=2.0 (TP targets ~3.8-4.8%), trades need time
+    to reach their TP. Progressive ROI gives them room early (5%+ target
+    in first 30 min), then steps down to exit stalled positions.
+    Never drops below friction (0.35%).
 
     Usage:
         roi = ProgressiveROI()
