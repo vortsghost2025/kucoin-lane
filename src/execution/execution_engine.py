@@ -539,6 +539,8 @@ class DryRunExecutor(ExecutionEngine):
         )
         self.log("info", f"Paper trade ledger initialized ({len(self.ledger.get_closed_trades())} historical trades)")
 
+        self._paper_balance = float(self.config.get("account_balance", 110))
+
         self.orchestrator = None
         if config.get("paper_live", True):
             try:
@@ -579,6 +581,19 @@ class DryRunExecutor(ExecutionEngine):
             except Exception as e:
                 self.log("warning", f"Orchestrator wiring failed, falling back to CSV-only: {e}")
                 self.orchestrator = None
+
+    def close_position(self, trade_id: int, exit_price: float, reason: str) -> Dict[str, Any]:
+        trade = super().close_position(trade_id, exit_price, reason)
+        if not trade:
+            return trade
+        pnl = trade.get("pnl", 0.0)
+        self._paper_balance += pnl
+        self.config["account_balance"] = self._paper_balance
+        logger.info(
+            f"[DRY-RUN] Paper balance updated: ${self._paper_balance - pnl:.2f} → ${self._paper_balance:.2f} "
+            f"(P&L: ${pnl:+.2f})"
+        )
+        return trade
 
     def load_backtest_data(self) -> None:
         self.log("info", "Loading backtest data from CSV files...")
@@ -650,7 +665,7 @@ class DryRunExecutor(ExecutionEngine):
                 "agent": "DryRunExecutor",
                 "action": "execute_trade",
                 "success": True,
-                "data": {"trade_executed": False, "reason": "Invalid position size"},
+                "data": {"trade_executed": False, "reason": "Invalid position size", "account_balance": self._paper_balance},
             }
 
         pair = input_data.get("pair") or list(market_data.keys())[0]
@@ -663,6 +678,7 @@ class DryRunExecutor(ExecutionEngine):
 
         sell_result = self._handle_spot_long_only_sell(pair, recommendation, entry_price)
         if sell_result is not None:
+            sell_result.setdefault("data", {})["account_balance"] = self._paper_balance
             return sell_result
 
         spot_long_only = self.config.get("spot_long_only", SPOT_LONG_ONLY)
@@ -742,8 +758,9 @@ class DryRunExecutor(ExecutionEngine):
                 "take_profit": take_profit,
                 "paper_trading": True,
                 "open_positions_count": len(self.open_positions),
-            },
-        }
+                "account_balance": self._paper_balance,
+        },
+    }
 
 
 class LiveExecutor(ExecutionEngine):
