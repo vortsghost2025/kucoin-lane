@@ -12,6 +12,8 @@ services:
       - MIN_NOTIONAL_USD=5.0
       - ACCOUNT_BALANCE=110.0
       - MAX_POSITION_SIZE_USD=55.0
+      - MAX_OPEN_POSITIONS=1
+      - TRADING_PAIRS=BTC/USDT
     dns:
       - 1.1.1.1
       - 8.8.8.8

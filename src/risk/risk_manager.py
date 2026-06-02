@@ -384,6 +384,17 @@ class RiskManagementAgent(BaseAgent):
             pair, self.min_position_size_units
         )
 
+        # ── Micro-account position sizing ──
+        # For accounts < $200: signal strength + min_signal_threshold already
+        # gate WHETHER to trade. Using confidence_multiplier on top of that
+        # double-penalizes valid signals and produces unfillable rounding-dust
+        # positions (e.g. $2 notional → below exchange minimum). A trade worth
+        # taking is worth taking at full risk_per_trade allocation.
+        # For accounts >= $200: use confidence_multiplier with a 0.60 floor so
+        # we never trade rounding dust, but still scale with signal quality.
+        MICRO_ACCOUNT_THRESHOLD = 200.0
+        CONFIDENCE_FLOOR = 0.60
+
         if self.enforce_min_position_size_only:
             if min_size_units <= 0:
                 return {
@@ -414,19 +425,43 @@ class RiskManagementAgent(BaseAgent):
                         entry_price=current_price,
                         kelly_pct=kelly_pct,
                     )
-                    position_size = position_size * signal_strength
+                    # Micro accounts: full Kelly, no signal reduction
+                    # Standard accounts: scale Kelly by confidence with floor
+                    if self.account_balance < MICRO_ACCOUNT_THRESHOLD:
+                        confidence_multiplier = 1.0
+                    else:
+                        confidence_multiplier = max(
+                            signal_strength * max(backtest_win_rate, 0.30),
+                            CONFIDENCE_FLOOR,
+                        )
+                    position_size = position_size * confidence_multiplier
                     actual_risk_amount = position_size * risk_per_unit
                 except Exception as kelly_err:
                     self.logger.warning(f"Kelly sizing failed, falling back to fixed: {kelly_err}")
-                    confidence_multiplier = signal_strength * max(backtest_win_rate, 0.30)
-                    actual_risk_amount = max_risk_amount * confidence_multiplier
+                    if self.account_balance < MICRO_ACCOUNT_THRESHOLD:
+                        actual_risk_amount = max_risk_amount
+                    else:
+                        confidence_multiplier = max(
+                            signal_strength * max(backtest_win_rate, 0.30),
+                            CONFIDENCE_FLOOR,
+                        )
+                        actual_risk_amount = max_risk_amount * confidence_multiplier
                     if risk_per_unit > 0:
                         position_size = actual_risk_amount / risk_per_unit
                     else:
                         position_size = 0
             else:
-                confidence_multiplier = signal_strength * max(backtest_win_rate, 0.30)
-                actual_risk_amount = max_risk_amount * confidence_multiplier
+                # Fixed (non-Kelly) path — most common for new/paper accounts
+                if self.account_balance < MICRO_ACCOUNT_THRESHOLD:
+                    # Micro account: use full risk_per_trade, no reduction
+                    actual_risk_amount = max_risk_amount
+                else:
+                    # Standard account: confidence-scaled with floor
+                    confidence_multiplier = max(
+                        signal_strength * max(backtest_win_rate, 0.30),
+                        CONFIDENCE_FLOOR,
+                    )
+                    actual_risk_amount = max_risk_amount * confidence_multiplier
                 if risk_per_unit > 0:
                     position_size = actual_risk_amount / risk_per_unit
                 else:
