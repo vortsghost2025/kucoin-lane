@@ -65,3 +65,7 @@ paper_trades_ledger_sim_config.json
 
 # External research repos (never commit cloned code)
 external/
+
+# Market data files
+data/
+sweep_output.txt
