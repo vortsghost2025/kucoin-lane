@@ -1,0 +1,1 @@
+{"data_file": "data/btc_usdt_1h.csv", "bars": 43800, "days": 1825.0, "start_equity": 110.0, "fee_pct": 0.001, "n_combos": 32256, "results": [], "note": "1h timeframe: 0/32256 combos profitable at taker fees (0.1%). Results archived from mega sweep. See MEGA_SWEEP_RESULTS.md for summary."}
