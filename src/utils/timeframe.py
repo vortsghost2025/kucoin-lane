@@ -53,7 +53,11 @@ ATR_THRESHOLD_BY_TIMEFRAME: Dict[str, float] = {
     "15min": 0.025,
     "30min": 0.03,
     "1hour": 0.04,
+    "2hour": 0.05,
+    "4hour": 0.07,
     "6hour": 0.10,
+    "8hour": 0.12,
+    "12hour": 0.13,
     "1day": 0.15,
 }
 

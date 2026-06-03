@@ -40,6 +40,7 @@ from .regime_detector import RegimeDetector
 from .lead_lag import LeadLagMonitor
 from .whale_watch import WhaleWatch
 from ..data.kucoin_klines_fetcher import KuCoinKlinesFetcher
+from .strategies import StrategyFactory
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,22 @@ class IntelligenceOrchestrator(BaseAgent):
         self.regime_detector = RegimeDetector(timeframe=self.timeframe) if enable_regime else None
         self.lead_lag = LeadLagMonitor() if enable_lead_lag else None
         self.whale_watch = WhaleWatch() if enable_whale else None
+        
+        # Strategy signal generator (VolBreakout, Supertrend, or legacy RSI/regime)
+        strategy_name = config.get("strategy") or os.getenv("STRATEGY", "rsi_regime").lower()
+        if strategy_name in ("vol_breakout", "supertrend"):
+            strategy_params = config.get("strategy_params", {})
+            try:
+                self.strategy = StrategyFactory.create(strategy_name, strategy_params)
+                self.strategy_name = strategy_name
+                self.logger.info(f"Strategy engine: {strategy_name} (params: {strategy_params})")
+            except Exception as e:
+                self.logger.warning(f"Strategy '{strategy_name}' init failed: {e}, falling back to rsi_regime")
+                self.strategy = None
+                self.strategy_name = "rsi_regime"
+        else:
+            self.strategy = None
+            self.strategy_name = "rsi_regime"
 
         self.enabled_modules = {
             "regime": enable_regime,
@@ -607,13 +624,15 @@ class IntelligenceOrchestrator(BaseAgent):
             "reasoning": str,
             "regime": {...},
             "lead_lag": {...},
-            "whale": {...}
+            "whale": {...},
+            "strategy": {...}  # NEW: strategy signal if enabled
         }
         """
         results: Dict[str, Any] = {
             "regime": None,
             "lead_lag": None,
             "whale": None,
+            "strategy": None,
         }
 
         if self.regime_detector:
@@ -624,6 +643,18 @@ class IntelligenceOrchestrator(BaseAgent):
 
         if self.whale_watch:
             results["whale"] = self.whale_watch.analyze_order_flow(df, order_book)
+
+        # Strategy signal (VolBreakout / Supertrend) — generates independent BUY/SELL
+        if self.strategy is not None:
+            try:
+                strategy_signal = self.strategy.generate_signal(df)
+                results["strategy"] = strategy_signal
+                self.logger.info(
+                    f"[STRATEGY] {self.strategy_name}: action={strategy_signal['action']} "
+                    f"confidence={strategy_signal['confidence']:.2f} — {strategy_signal['reasoning']}"
+                )
+            except Exception as e:
+                self.logger.warning(f"[STRATEGY] {self.strategy_name} signal failed: {e}")
 
         action, confidence, multiplier, reasoning = self._make_decision(results, symbol)
 
@@ -645,6 +676,48 @@ class IntelligenceOrchestrator(BaseAgent):
                 LEAD_LAG_DANGER_MULTIPLIER,
                 "LEAD-LAG DANGER: Binance cascade detected, exiting all positions",
             )
+
+        # Strategy-based decisions (VolBreakout / Supertrend) take priority
+        if results.get("strategy") and self.strategy is not None:
+            strat = results["strategy"]
+            strat_action = strat.get("action", "HOLD")
+            strat_conf = strat.get("confidence", 0.0)
+
+            # In SPOT_LONG_ONLY mode, suppress SELL signals from strategy
+            spot_long_only = self.config.get("spot_long_only", SPOT_LONG_ONLY)
+
+            if strat_action == "BUY" and strat_conf > 0.5:
+                # Check regime guard: don't buy in strong downtrend
+                if results["regime"] and results["regime"].get("recommendation") == "HALT_TRADING":
+                    return (
+                        "HOLD",
+                        strat_conf * 0.5,
+                        V1_SOFT_HALT_MULTIPLIER,
+                        f"STRATEGY {self.strategy_name} BUY suppressed by downtrend regime "
+                        f"(ADX: {results['regime']['adx']:.1f})",
+                    )
+                return (
+                    "BUY",
+                    strat_conf,
+                    1.0,
+                    f"STRATEGY {self.strategy_name}: {strat.get('reasoning', '')}",
+                )
+            elif strat_action == "SELL" and strat_conf > 0.5:
+                if spot_long_only:
+                    return (
+                        "HOLD",
+                        strat_conf,
+                        0.0,
+                        f"STRATEGY {self.strategy_name} SELL → SPOT_LONG_ONLY hold "
+                        f"({strat.get('reasoning', '')})",
+                    )
+                return (
+                    "SELL",
+                    strat_conf,
+                    1.0,
+                    f"STRATEGY {self.strategy_name}: {strat.get('reasoning', '')}",
+                )
+            # Strategy says HOLD — fall through to regime/whale logic
 
         if results["regime"]:
             regime = results["regime"]

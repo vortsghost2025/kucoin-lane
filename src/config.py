@@ -180,11 +180,14 @@ def _load_asset_profiles():
 ASSET_PROFILES = _load_asset_profiles()
 
 SPOT_LONG_ONLY = os.getenv("SPOT_LONG_ONLY", "true").lower() in ("true", "1", "yes")
+STRATEGY = os.getenv("STRATEGY", "rsi_regime").lower()
+STRATEGY_PARAMS_JSON = os.getenv("STRATEGY_PARAMS_JSON", "")
 
 TRADING_CONFIG = {
     "account_balance": float(os.getenv("ACCOUNT_BALANCE", "110")),
     "paper_trading": os.getenv("PAPER_TRADING", "true").lower() == "true",
     "spot_long_only": SPOT_LONG_ONLY,
+    "strategy": STRATEGY,
     "trading_pairs": os.getenv("TRADING_PAIRS", "BTC/USDT,ETH/USDT").split(
         ","
     ),
@@ -273,6 +276,7 @@ MONITOR_CONFIG = {
 }
 
 REGIME_GUARD_MODE = os.getenv("REGIME_GUARD_MODE", "v1_soft_halt")
+
 
 TELEGRAM_CONFIG = {
     "bot_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
