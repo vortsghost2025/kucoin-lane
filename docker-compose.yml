@@ -14,6 +14,8 @@ services:
       - MAX_POSITION_SIZE_USD=55.0
       - MAX_OPEN_POSITIONS=1
       - TRADING_PAIRS=BTC/USDT
+      - CANDLE_INTERVAL=1day
+      - STRATEGY=vol_breakout
     dns:
       - 1.1.1.1
       - 8.8.8.8
