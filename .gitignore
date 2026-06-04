@@ -69,3 +69,11 @@ external/
 # Market data files
 data/
 sweep_output.txt
+docs/research/short_leverage_sweep_1d.json
+# Large sweep result JSONs (>100MB, use .gz or LFS)
+docs/research/mega_sweep_1d_maker.json
+docs/research/mega_sweep_1d_taker.json
+docs/research/mega_sweep_4h_maker.json
+docs/research/mega_sweep_4h_taker.json
+docs/research/mega_sweep_results.json
+docs/research/btc_compounding_sweep_results.json
