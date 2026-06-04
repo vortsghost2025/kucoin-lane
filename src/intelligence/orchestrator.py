@@ -22,7 +22,7 @@ import os
 import json
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -82,6 +82,8 @@ V4_PROBE_MULTIPLIER = 0.5
 SPREAD_WARNING_THRESHOLD = 0.005
 SPREAD_REDUCTION_THRESHOLD = 0.01
 SPREAD_HIGH_THRESHOLD = 0.02
+INTEL_BOOST_CONFIDENCE_THRESHOLD = 0.6
+INTEL_BOOST_WEIGHT = 0.3
 
 
 class WorkflowStage(Enum):
@@ -386,7 +388,7 @@ class IntelligenceOrchestrator(BaseAgent):
         self.current_stage = new_stage
         self.workflow_history.append(
             {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "from_stage": old_stage.value,
                 "to_stage": new_stage.value,
                 "metadata": metadata or {},
@@ -395,7 +397,7 @@ class IntelligenceOrchestrator(BaseAgent):
         self.logger.info(f"Workflow: {old_stage.value} -> {new_stage.value}")
 
     def _reset_daily_risk_if_needed(self) -> None:
-        today = datetime.utcnow().date().isoformat()
+        today = datetime.now(timezone.utc).date().isoformat()
         if self._last_daily_reset == today:
             return
         risk_agent = self.agent_registry.get("RiskManagementAgent")
@@ -1022,13 +1024,13 @@ class IntelligenceOrchestrator(BaseAgent):
                             intel_multiplier = intel_analysis.get("position_multiplier", 1.0)
                             intel_action = intel_analysis.get("action", "HOLD")
                             base_strength = pair_analysis_from_market.get("signal_strength", 0.0)
-                            if intel_action in ("BUY",) and intel_confidence > 0.6:
-                                boost = intel_confidence * intel_multiplier
-                                boosted_strength = min(1.0, base_strength + boost * 0.15)
-                                pair_analysis_from_market["signal_strength"] = boosted_strength
-                                pair_analysis_from_market["intelligence_boost"] = {
-                                    "base_strength": base_strength,
-                                    "boost": boost * 0.15,
+        if intel_action in ("BUY",) and intel_confidence > INTEL_BOOST_CONFIDENCE_THRESHOLD:
+            boost = intel_confidence * intel_multiplier
+            boosted_strength = min(1.0, base_strength + boost * INTEL_BOOST_WEIGHT)
+            pair_analysis_from_market["signal_strength"] = boosted_strength
+            pair_analysis_from_market["intelligence_boost"] = {
+                "base_strength": base_strength,
+                "boost": boost * INTEL_BOOST_WEIGHT,
                                     "intel_action": intel_action,
                                     "intel_confidence": intel_confidence,
                                     "intel_multiplier": intel_multiplier,
@@ -1512,8 +1514,8 @@ class IntelligenceOrchestrator(BaseAgent):
         cycle_start: float,
     ) -> None:
         os.makedirs("agent-logs", exist_ok=True)
-        ts = datetime.utcnow().strftime("%Y-%m-%dT%H-%M-%S")
-        iso_ts = datetime.utcnow().isoformat()
+        ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H-%M-%S")
+        iso_ts = datetime.now(timezone.utc).isoformat()
         result = cycle_results.get("final_result", {})
         stage_val = self.current_stage.value
 
@@ -1535,5 +1537,5 @@ class IntelligenceOrchestrator(BaseAgent):
             "circuit_breaker_active": self.circuit_breaker_active,
             "agents": agent_statuses,
             "workflow_history_length": len(self.workflow_history),
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
         }

@@ -7,7 +7,7 @@ Provides common functionality for logging, state management, and communication.
 
 import logging
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
 
@@ -71,7 +71,7 @@ class BaseAgent:
         message = {
             "agent": self.agent_name,
             "action": action,
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "success": success,
             "data": data or {},
             "error": error,
@@ -107,4 +107,4 @@ class BaseAgent:
             self.logger.warning(f"Failed: {action}")
             self.status = AgentStatus.ERROR
         self.execution_count += 1
-        self.last_execution_time = datetime.utcnow()
+        self.last_execution_time = datetime.now(timezone.utc)

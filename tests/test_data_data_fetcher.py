@@ -1,6 +1,6 @@
 import pytest
 from unittest.mock import patch, MagicMock
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from src.data.data_fetcher import DataFetchingAgent
 
 
@@ -28,14 +28,14 @@ class TestDataFetchingAgent:
     def test_is_cache_valid_expired(self, agent):
         agent.cache["test"] = {
             "data": {"price": 100},
-            "timestamp": datetime.utcnow() - timedelta(seconds=120),
+            "timestamp": datetime.now(timezone.utc) - timedelta(seconds=120),
         }
         assert agent._is_cache_valid("test") is False
 
     def test_is_cache_valid_fresh(self, agent):
         agent.cache["test"] = {
             "data": {"price": 100},
-            "timestamp": datetime.utcnow(),
+            "timestamp": datetime.now(timezone.utc),
         }
         assert agent._is_cache_valid("test") is True
 
@@ -95,7 +95,7 @@ class TestDataFetchingAgent:
         assert result["success"] is False
 
     def test_clear_cache(self, agent):
-        agent.cache["test"] = {"data": {}, "timestamp": datetime.utcnow()}
+        agent.cache["test"] = {"data": {}, "timestamp": datetime.now(timezone.utc)}
         agent.clear_cache()
         assert agent.cache == {}
 
@@ -107,7 +107,7 @@ class TestDataFetchingAgent:
     def test_get_cache_status_with_entries(self, agent):
         agent.cache["test"] = {
             "data": {"price": 100},
-            "timestamp": datetime.utcnow(),
+            "timestamp": datetime.now(timezone.utc),
         }
         status = agent.get_cache_status()
         assert status["total_entries"] == 1
