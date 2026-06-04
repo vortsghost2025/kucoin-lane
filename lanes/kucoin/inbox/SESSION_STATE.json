@@ -1,0 +1,32 @@
+{
+  "lane": "kucoin",
+  "cycle": 14,
+  "timestamp": "2026-06-04T00:00:00.000000+00:00",
+  "mode": "DryRunExecutor",
+  "executor_class": "DryRunExecutor",
+  "status": "maintenance",
+  "runtime_status": "idle",
+  "phase": "post-refactor",
+  "final": false,
+  "step": "P3-hygiene-complete",
+  "pid": null,
+  "uptime_seconds": 0,
+  "changes_applied": [
+    "P0-1: docker-compose coin_parameters.json -> asset_profiles.json",
+    "P0-2a: removed dead __main__ block from execution_engine.py",
+    "P0-2b: Dockerfile ENTRYPOINT fixed to src.execution",
+    "P0-3: healthcheck uses heartbeat.json mtime < 300s",
+    "P1-4: 30 backtester tests added",
+    "P1-5: profit_factor capped at 99.0",
+    "P1-6: adapter tests rewritten for real __init__",
+    "P2-7: deleted README-OLD-WINDOWS-CLONE.txt",
+    "P2-8: added nul to .gitignore",
+    "P2-9: removed LABEL lane_number from Dockerfile",
+    "P2-10: account_balance default changed to float",
+    "P3-11: short-entry logic in walk-forward backtester",
+    "P3-12: externalized intelligence boost constants",
+    "P3-13: datetime.utcnow() -> datetime.now(timezone.utc) across 7 files + tests",
+    "P3-14: SESSION_STATE.json updated from stale test data"
+  ],
+  "test_baseline": "446 passed, 0 failed, 0 errors"
+}
