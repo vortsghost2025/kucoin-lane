@@ -1,7 +1,6 @@
 FROM python:3.11-slim
 
 LABEL lane="kucoin-lane"
-LABEL lane_number="4"
 LABEL description="KuCoin margin trading bot — autonomous, self-healing, self-upgrading"
 
 WORKDIR /app
