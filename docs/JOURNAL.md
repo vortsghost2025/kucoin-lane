@@ -646,3 +646,80 @@ Decomposed monolithic `_write_cycle_artifacts` (1007-line class) method into 5 f
 ---
 
 _This journal is the single source of truth for kucoin-lane work. Updated at every action. Never retroactively modified � only appended._
+## Session 4 — 2026-06-04 (z-ai/glm-5.1)
+
+### P0 Critical Fixes — Committed
+
+| Seq | Time(UTC) | Action | Surface | Result | Evidence |
+|-----|-----------|--------|---------|--------|----------|
+| 1 | ~17:00 | fix | docker-compose.yml:26 | Mounted asset_profiles.json instead of missing coin_parameters.json | 187c216 |
+| 2 | ~17:10 | fix | docker-compose.yml:31 + Dockerfile:27 | Replaced file-existence healthcheck with heartbeat.json mtime<300s check | 187c216 + c54baab |
+| 3 | ~17:20 | fix | Dockerfile:29 | Changed ENTRYPOINT from python -m src.execution.execution_engine (broken __main__) to python -m src.execution (uses __main__.py with absolute imports) | c54baab |
+| 4 | ~17:30 | fix | execution_engine.py:1015-1032 | Removed dead __main__ block with broken relative imports that would crash on python -m src.execution.execution_engine | 46841af |
+
+### Test Evidence
+
+- pytest tests/ -q --tb=short -> 414 passed, 2 failed (tautological adapter tests - P1-6), 141 warnings
+- 2 failures are pre-existing tautological tests in test_exchange_adapter.py, not regressions
+- All P0 fixes are structural/Docker - no live-trade safety boundary violated
+
+---
+
+
+## P1 Session - 2026-06-04T13:55:23.206819
+
+### P1-4: Create test_historical_backtester.py
+- What changed: New file tests/test_historical_backtester.py with 30 tests
+- Coverage: __init__ defaults/custom, backtest_pair None/empty/short paths,
+  _calculate_rsi, _calculate_adx_proxy (fallback), _run_walk_forward trade structure,
+  _compute_metrics (wins+losses, zero-loss, all-loss), end-to-end mock fetcher
+- Tests ran: pytest tests/test_historical_backtester.py -> 30 passed
+- Before: 0 backtester tests; After: 30 tests
+
+### P1-5: Cap profit_factor at 99.0
+- What changed: historical_backtester.py:262-265 wrapped profit_factor in min(..., 99.0)
+  so zero-loss scenarios return 99.0 instead of float(inf)
+- Tests ran: pytest tests/test_historical_backtester.py::TestComputeMetrics -> all pass
+- Before: profit_factor=inf (JSON crash); After: profit_factor=99.0
+
+### P1-6: Rewrite tautological adapter tests
+- What changed: test_exchange_adapter.py replaced 3 tautological tests
+  (test_sandbox_url_selected, test_live_url_selected, test_init_sets_passphrase)
+  with real __init__-exercising tests using env var patching + SDK mock
+- Tests ran: pytest tests/test_exchange_adapter.py -> all pass
+- Before: 2 failed (tautological); After: 3 real behavior tests pass
+
+### Baseline shift
+- Before P1: 414 passed, 2 failed, 141 warnings
+- After P1: 446 passed, 0 failed, 141 warnings
+
+
+## P2 Session - 2026-06-04T18:17:04.022366+00:00
+
+### P2-7: Delete README-OLD-WINDOWS-CLONE.txt
+- What changed: Deleted stale README-OLD-WINDOWS-CLONE.txt (was never in git index)
+- Tests ran: git status confirmed file absent from disk and index
+- Before: stale file on disk; After: removed
+
+### P2-8: Add nul to .gitignore
+- What changed: Added nul entry under OS section in .gitignore
+- Tests ran: nul file not on disk; entry is preventive for Windows environments
+- Before: no nul gitignore; After: nul ignored
+
+### P2-9: Remove LABEL lane_number from Dockerfile
+- What changed: Removed line 4 (LABEL lane_number=4) from Dockerfile
+- Rationale: Lane numbers come from registry/deployment, not baked into image
+- Tests ran: docker compose config validates; pytest 446 passed
+- Before: 3 LABEL lines; After: 2 LABEL lines
+
+### P2-10: Fix account_balance type in risk_manager.py
+- What changed: Line 42 changed from cfg.get(account_balance, 10000) to
+  float(cfg.get(account_balance, 10000.0))
+- Rationale: config.py defines account_balance as float; int default caused
+  silent type coercion inconsistency
+- Tests ran: pytest 446 passed, 0 failed, 141 warnings
+- Before: int 10000 default; After: float 10000.0 default
+
+### Baseline
+- 446 passed, 0 failed, 141 warnings (unchanged from P1)
+- Commit: 9d7b036
