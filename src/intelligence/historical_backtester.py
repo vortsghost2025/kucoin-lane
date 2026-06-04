@@ -259,10 +259,11 @@ class HistoricalBacktester:
             "losing_trades": len(losses),
             "avg_win_pct": avg_win,
             "avg_loss_pct": avg_loss,
-            "profit_factor": (
+            "profit_factor": min(
                 abs(sum(wins) / sum(abs(l) for l in losses))
                 if losses and sum(abs(l) for l in losses) > 0
-                else float("inf")
+                else 99.0,
+                99.0,
             ),
             "sharpe_approx": round(sharpe, 2),
         }

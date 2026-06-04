@@ -1,6 +1,7 @@
 """Tests for exchange_adapter.py - ABC contract, KuCoinAdapter static methods, factory."""
 
 import os
+import sys
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -95,39 +96,28 @@ class TestKuCoinAdapterStaticMethods:
 class TestKuCoinAdapterInit:
     """Test initialization paths (mocked SDK)."""
 
-    @patch("src.execution.exchange_adapter.KuCoinAdapter.__init__", return_value=None)
-    def test_init_sets_passphrase(self, mock_init):
-        adapter = KuCoinAdapter.__new__(KuCoinAdapter)
-        adapter.passphrase = "mypass"
-        assert adapter.passphrase == "mypass"
+    def test_init_stores_passphrase(self):
+        with patch.dict(os.environ, {"KUCOIN_USE_SANDBOX": "false"}):
+            with patch.dict("sys.modules", {"kucoin": MagicMock(), "kucoin.client": MagicMock()}):
+                with patch.object(KuCoinAdapter, "_test_connection"):
+                    adapter = KuCoinAdapter(api_key="k", api_secret="s", passphrase="mypass")
+                    assert adapter.passphrase == "mypass"
 
     @patch.dict(os.environ, {"KUCOIN_USE_SANDBOX": "true"})
-    def test_sandbox_url_selected(self):
-        with patch("src.execution.exchange_adapter.KuCoinAdapter._test_connection"):
-            with patch("kucoin.client.Client") as MockClient:
-                MockClient.return_value = MagicMock()
-                adapter = KuCoinAdapter.__new__(KuCoinAdapter)
-                adapter.exchange_name = "kucoin"
-                adapter.base_url = "https://openapi-sandbox.kucoin.com"
-                adapter.api_key = "k"
-                adapter.api_secret = "s"
-                adapter.passphrase = "p"
-                adapter.session = MagicMock()
-                assert "sandbox" in adapter.base_url
+    def test_sandbox_url_set_when_env_true(self):
+        with patch.dict("sys.modules", {"kucoin": MagicMock(), "kucoin.client": MagicMock()}):
+            with patch.object(KuCoinAdapter, "_test_connection"):
+                adapter = KuCoinAdapter(api_key="k", api_secret="s", passphrase="p")
+                assert adapter.base_url == "https://openapi-sandbox.kucoin.com"
+                assert adapter.sandbox is True
 
     @patch.dict(os.environ, {"KUCOIN_USE_SANDBOX": "false"})
-    def test_live_url_selected(self):
-        with patch("src.execution.exchange_adapter.KuCoinAdapter._test_connection"):
-            with patch("kucoin.client.Client") as MockClient:
-                MockClient.return_value = MagicMock()
-                adapter = KuCoinAdapter.__new__(KuCoinAdapter)
-                adapter.exchange_name = "kucoin"
-                adapter.base_url = "https://openapi-v2.kucoin.com"
-                adapter.api_key = "k"
-                adapter.api_secret = "s"
-                adapter.passphrase = "p"
-                adapter.session = MagicMock()
-                assert "openapi-v2" in adapter.base_url
+    def test_production_url_set_when_env_false(self):
+        with patch.dict("sys.modules", {"kucoin": MagicMock(), "kucoin.client": MagicMock()}):
+            with patch.object(KuCoinAdapter, "_test_connection"):
+                adapter = KuCoinAdapter(api_key="k", api_secret="s", passphrase="p")
+                assert adapter.base_url == "https://api.kucoin.com"
+                assert adapter.sandbox is False
 
     def test_import_error_raises_runtime_error(self):
         with patch.dict("sys.modules", {"kucoin": None, "kucoin.client": None}):
