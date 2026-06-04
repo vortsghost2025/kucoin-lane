@@ -723,3 +723,31 @@ _This journal is the single source of truth for kucoin-lane work. Updated at eve
 ### Baseline
 - 446 passed, 0 failed, 141 warnings (unchanged from P1)
 - Commit: 9d7b036
+
+
+## P3 Commit — 2026-06-04
+
+**Commit**: 517caf3 (source + tests), e07d5ad (SESSION_STATE.json)
+
+### P3-11: Short-side entry/exit in walk-forward backtester
+- **Changed**: src/intelligence/historical_backtester.py — added short entry logic to _run_walk_forward
+- **Design**: short stops at +5% (vs -5% long), short TP at -10% (vs +10% long), short exit on RSI<30 or regime TRENDING_UP; side field in trade dicts
+- **Tests**: 446 passed, 0 failed (existing 30 backtester tests + full suite)
+
+### P3-12: Externalize intelligence boost constants
+- **Changed**: src/intelligence/orchestrator.py — INTEL_BOOST_CONFIDENCE_THRESHOLD=0.6 and INTEL_BOOST_WEIGHT=0.3 moved to module level (lines 81-82)
+- **Tests**: 446 passed, 0 failed
+
+### P3-13: Replace deprecated datetime.utcnow() with datetime.now(timezone.utc)
+- **Changed**: 7 source files, 22 total replacements; 1 test file, 4 replacements; timezone import added where needed
+  - execution_engine.py (3), orchestrator.py (5), backtester.py (1), data_fetcher.py (4), entry_timing.py (2), monitor_agent.py (5), base_agent.py (2)
+  - tests/test_data_data_fetcher.py (4)
+- **Also fixed**: indentation bug orchestrator.py lines 784-790 (+20 spaces); ast.parse() verified no SyntaxError
+- **Tests**: 446 passed, 0 failed, 141 warnings
+
+### P3-14: Update SESSION_STATE.json
+- **Changed**: lanes/kucoin/inbox/SESSION_STATE.json — cycle 14, all 14 changes listed, current project state
+- **Tests**: N/A (metadata file)
+
+### Final Baseline
+- 446 passed, 0 failed, 141 warnings — confirmed after all P3 changes
