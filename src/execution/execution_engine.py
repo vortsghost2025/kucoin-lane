@@ -1282,21 +1282,4 @@ def select_executor(dry_run: bool, live_trading: bool) -> ExecutionEngine:
     )
 
 
-if __name__ == "__main__":
-    import sys
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        stream=sys.stdout,
-    )
-
-    from ..deterministic_startup import DeterministicStartup
-
-    startup = DeterministicStartup()
-    startup.cleanup_leftover_state()
-    startup.verify_critical_systems(required_systems=["working_directory", "heartbeat_io", "kucoin_api"])
-
-    interval = int(os.getenv("CYCLE_INTERVAL", str(MONITOR_INTERVAL_MIN)))
-    executor = select_executor(DRY_RUN, LIVE_TRADING)
-    executor.run_continuous(interval_minutes=interval)
