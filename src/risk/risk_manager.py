@@ -39,7 +39,7 @@ class RiskManagementAgent(BaseAgent):
         super().__init__("RiskManagementAgent", config)
         cfg = config or {}
 
-        self.account_balance = cfg.get("account_balance", 10000)
+        self.account_balance = float(cfg.get("account_balance", 10000.0))
         self.risk_per_trade = cfg.get("risk_per_trade", 0.01)
         self.min_risk_reward_ratio = (
             cfg.get("min_risk_reward_ratio", 1.5)
