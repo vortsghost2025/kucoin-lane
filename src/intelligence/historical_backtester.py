@@ -173,15 +173,21 @@ class HistoricalBacktester:
             else:
                 regime = "RANGING"
 
-            if position is None:
-                if regime == "TRENDING_UP" and rsi < 40:
-                    position = {"entry_price": close, "entry_bar": i}
-                elif regime == "RANGING" and rsi < 30:
-                    position = {"entry_price": close, "entry_bar": i}
-            else:
-                should_exit = False
-                exit_reason = ""
+        if position is None:
+            if regime == "TRENDING_UP" and rsi < 40:
+                position = {"entry_price": close, "entry_bar": i, "side": "long"}
+            elif regime == "RANGING" and rsi < 30:
+                position = {"entry_price": close, "entry_bar": i, "side": "long"}
+            elif regime == "TRENDING_DOWN" and rsi > 60:
+                position = {"entry_price": close, "entry_bar": i, "side": "short"}
+            elif regime == "RANGING" and rsi > 70:
+                position = {"entry_price": close, "entry_bar": i, "side": "short"}
+        else:
+            should_exit = False
+            exit_reason = ""
+            side = position.get("side", "long")
 
+            if side == "long":
                 if rsi > 70:
                     should_exit = True
                     exit_reason = "RSI overbought"
@@ -197,18 +203,38 @@ class HistoricalBacktester:
                 elif close > position["entry_price"] * 1.10:
                     should_exit = True
                     exit_reason = "Take profit hit"
+            else:
+                if rsi < 30:
+                    should_exit = True
+                    exit_reason = "RSI oversold"
+                elif regime == "TRENDING_UP":
+                    should_exit = True
+                    exit_reason = "Regime turned bullish"
+                elif i - position["entry_bar"] >= 48:
+                    should_exit = True
+                    exit_reason = "Max hold period"
+                elif close > position["entry_price"] * 1.05:
+                    should_exit = True
+                    exit_reason = "Stop loss hit"
+                elif close < position["entry_price"] * 0.90:
+                    should_exit = True
+                    exit_reason = "Take profit hit"
 
-                if should_exit:
+            if should_exit:
+                if side == "long":
                     pnl_pct = (close - position["entry_price"]) / position["entry_price"]
-                    trades.append({
-                        "entry_price": position["entry_price"],
-                        "exit_price": close,
-                        "pnl_pct": pnl_pct,
-                        "exit_reason": exit_reason,
-                        "bars_held": i - position["entry_bar"],
-                        "regime_at_entry": regime,
-                    })
-                    position = None
+                else:
+                    pnl_pct = (position["entry_price"] - close) / position["entry_price"]
+                trades.append({
+                    "entry_price": position["entry_price"],
+                    "exit_price": close,
+                    "pnl_pct": pnl_pct,
+                    "exit_reason": exit_reason,
+                    "bars_held": i - position["entry_bar"],
+                    "regime_at_entry": regime,
+                    "side": side,
+                })
+                position = None
 
         if position is not None:
             close = df.iloc[-1]["close"]

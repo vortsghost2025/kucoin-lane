@@ -6,7 +6,7 @@ Normalizes all data into a consistent format and implements basic caching.
 
 import logging
 from typing import Any, Dict, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..base_agent import BaseAgent, AgentStatus
 from .multi_provider_client import fetch_simple_price
@@ -45,7 +45,7 @@ class DataFetchingAgent(BaseAgent):
         if not cached_time:
             return False
 
-        age = (datetime.utcnow() - cached_time).total_seconds()
+        age = (datetime.now(timezone.utc) - cached_time).total_seconds()
         return age < self.cache_timeout
 
     def _get_coingecko_id(self, trading_pair: str) -> Optional[str]:
@@ -115,7 +115,7 @@ class DataFetchingAgent(BaseAgent):
 
                     self.cache[cache_key] = {
                         "data": normalized,
-                        "timestamp": datetime.utcnow(),
+                        "timestamp": datetime.now(timezone.utc),
                     }
                     self.logger.info(
                         f"Fetched {pair}: ${normalized['current_price']:.4f}"
@@ -133,7 +133,7 @@ class DataFetchingAgent(BaseAgent):
                     "market_data": market_data,
                     "symbols_count": len(market_data),
                     "cache_size": len(self.cache),
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 },
             )
 
@@ -167,7 +167,7 @@ class DataFetchingAgent(BaseAgent):
             "volume_24h": price_data.get("usd_24h_vol", 0),
             "price_change_24h": price_data.get("usd", 0) * price_data.get("usd_24h_change", 0) / 100,
             "price_change_24h_pct": price_data.get("usd_24h_change", 0),
-            "last_updated": datetime.utcnow().isoformat(),
+            "last_updated": datetime.now(timezone.utc).isoformat(),
             "currency": currency.upper(),
         }
 

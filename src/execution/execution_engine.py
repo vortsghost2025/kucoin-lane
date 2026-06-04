@@ -22,7 +22,7 @@ import logging
 import os
 import time
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -323,7 +323,7 @@ class ExecutionEngine(ABC):
         pnl_pct = (exit_price - trade["entry_price"]) / trade["entry_price"] * 100
 
         trade["exit_price"] = exit_price
-        trade["exit_time"] = datetime.utcnow().isoformat()
+        trade["exit_time"] = datetime.now(timezone.utc).isoformat()
         trade["exit_reason"] = reason
         trade["status"] = TradeStatus.CLOSED.value
         trade["pnl"] = pnl
@@ -532,12 +532,12 @@ class DryRunExecutor(ExecutionEngine):
             "pair": pair,
             "entry_price": entry_price,
             "position_size": position_size,
-            "entry_value": entry_price * position_size,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "entry_time": datetime.utcnow().isoformat(),
-            "status": TradeStatus.OPEN.value,
-            "paper_trading": True,
+    "entry_value": entry_price * position_size,
+    "stop_loss": stop_loss,
+    "take_profit": take_profit,
+    "entry_time": datetime.now(timezone.utc).isoformat(),
+    "status": TradeStatus.OPEN.value,
+    "paper_trading": True,
             "pnl": 0,
             "pnl_pct": 0,
             "exit_price": None,
@@ -860,12 +860,12 @@ class LiveExecutor(ExecutionEngine):
             "pair": pair,
             "entry_price": entry_price,
             "position_size": position_size,
-            "entry_value": entry_price * position_size,
-            "stop_loss": stop_loss,
-            "take_profit": take_profit,
-            "entry_time": datetime.utcnow().isoformat(),
-            "status": TradeStatus.OPEN.value,
-            "paper_trading": False,
+    "entry_value": entry_price * position_size,
+    "stop_loss": stop_loss,
+    "take_profit": take_profit,
+    "entry_time": datetime.now(timezone.utc).isoformat(),
+    "status": TradeStatus.OPEN.value,
+    "paper_trading": False,
             "pnl": 0,
             "pnl_pct": 0,
             "exit_price": None,

@@ -8,7 +8,7 @@ import json
 import logging
 import os
 from typing import Any, Dict, Optional, List
-from datetime import datetime
+from datetime import datetime, timezone
 
 from ..base_agent import BaseAgent, AgentStatus
 
@@ -56,7 +56,7 @@ class MonitoringAgent(BaseAgent):
             exec_result = input_data.get("exec_result") or {}
 
             event = {
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "workflow_stage": input_data.get("workflow_stage", "unknown"),
                 "data_fetch": data_result,
                 "market_analysis": analysis_result,
@@ -134,7 +134,7 @@ class MonitoringAgent(BaseAgent):
                     {
                         "level": "INFO",
                         "message": f"Trade #{trade_id} executed at ${entry_price_str}, size {size_str}",
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                 )
 
@@ -145,7 +145,7 @@ class MonitoringAgent(BaseAgent):
                 {
                     "level": "WARNING",
                     "message": f"Trade rejected by risk manager: {reason}",
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             )
 
@@ -155,7 +155,7 @@ class MonitoringAgent(BaseAgent):
                 {
                     "level": "WARNING",
                     "message": "Downtrend detected - trading paused for safety",
-                    "timestamp": datetime.utcnow().isoformat(),
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
             )
 
@@ -165,7 +165,7 @@ class MonitoringAgent(BaseAgent):
         summary = executor_agent.get_performance_summary()
 
         report = {
-            "timestamp": datetime.utcnow().isoformat(),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
             "trading_statistics": summary,
             "alerts_generated": len(self.alerts),
             "events_logged": self.events_count,

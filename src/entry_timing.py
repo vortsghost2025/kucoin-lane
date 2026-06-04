@@ -4,7 +4,7 @@ Prevents premature entries during mid-candle downswings.
 """
 
 from typing import Dict, Tuple, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 
 
@@ -31,7 +31,7 @@ class EntryTimingValidator:
     ) -> Tuple[bool, str]:
         if symbol not in self.baseline_prices:
             self.baseline_prices[symbol] = current_price
-            self.baseline_timestamps[symbol] = datetime.utcnow()
+            self.baseline_timestamps[symbol] = datetime.now(timezone.utc)
             self.price_history[symbol] = [current_price]
 
             self.logger.info(f"[{symbol}] Baseline established at ${current_price:.2f}")
@@ -86,7 +86,7 @@ class EntryTimingValidator:
         if symbol not in self.baseline_timestamps:
             return None
 
-        age = (datetime.utcnow() - self.baseline_timestamps[symbol]).total_seconds()
+        age = (datetime.now(timezone.utc) - self.baseline_timestamps[symbol]).total_seconds()
         return age
 
     def get_status(self, symbol: str) -> Dict:
