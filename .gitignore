@@ -58,3 +58,23 @@ htmlcov/
 .venv/
 venv/
 .local-backup/
+
+# Paper trade runtime data
+paper_trades_ledger.json
+paper_trades_ledger_report.txt
+paper_trades_ledger_sim_config.json
+
+# External research repos (never commit cloned code)
+external/
+
+# Market data files
+data/
+sweep_output.txt
+docs/research/short_leverage_sweep_1d.json
+# Large sweep result JSONs (>100MB, use .gz or LFS)
+docs/research/mega_sweep_1d_maker.json
+docs/research/mega_sweep_1d_taker.json
+docs/research/mega_sweep_4h_maker.json
+docs/research/mega_sweep_4h_taker.json
+docs/research/mega_sweep_results.json
+docs/research/btc_compounding_sweep_results.json

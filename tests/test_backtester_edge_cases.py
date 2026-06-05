@@ -5,7 +5,19 @@ from src.intelligence.backtester import BacktestingAgent
 class TestBacktesterBoundaryWinRates:
     @pytest.fixture
     def agent(self):
-        return BacktestingAgent({"min_win_rate": 0.45, "max_drawdown": 0.15})
+        return BacktestingAgent({
+            "min_win_rate": 0.45,
+            "max_drawdown": 0.15,
+            "asset_factor_default": {
+                "win_rate_multiplier": 1.0,
+                "max_drawdown_adjustment": 1.0,
+            },
+            "asset_performance_factors": {
+                "SOL/USDT": {"win_rate_multiplier": 1.0, "max_drawdown_adjustment": 1.0},
+                "BTC/USDT": {"win_rate_multiplier": 0.87, "max_drawdown_adjustment": 1.15},
+                "ETH/USDT": {"win_rate_multiplier": 0.90, "max_drawdown_adjustment": 1.10},
+            },
+        })
 
     def test_zero_signal_strength_buy(self, agent):
         wr = agent._calculate_buy_signal_win_rate(0.0, "SOL/USDT")
@@ -42,7 +54,19 @@ class TestBacktesterBoundaryWinRates:
 class TestBacktesterDrawdownBoundary:
     @pytest.fixture
     def agent(self):
-        return BacktestingAgent({"min_win_rate": 0.45, "max_drawdown": 0.15})
+        return BacktestingAgent({
+            "min_win_rate": 0.45,
+            "max_drawdown": 0.15,
+            "asset_factor_default": {
+                "win_rate_multiplier": 1.0,
+                "max_drawdown_adjustment": 1.0,
+            },
+            "asset_performance_factors": {
+                "SOL/USDT": {"win_rate_multiplier": 1.0, "max_drawdown_adjustment": 1.0},
+                "BTC/USDT": {"win_rate_multiplier": 0.87, "max_drawdown_adjustment": 1.15},
+                "ETH/USDT": {"win_rate_multiplier": 0.90, "max_drawdown_adjustment": 1.10},
+            },
+        })
 
     def test_hold_drawdown_less_than_buy(self, agent):
         hold_dd = agent._estimate_max_drawdown("HOLD", 0.5, "SOL/USDT")
@@ -72,7 +96,19 @@ class TestBacktesterDrawdownBoundary:
 class TestBacktesterValidation:
     @pytest.fixture
     def agent(self):
-        return BacktestingAgent({"min_win_rate": 0.45, "max_drawdown": 0.15})
+        return BacktestingAgent({
+            "min_win_rate": 0.45,
+            "max_drawdown": 0.15,
+            "asset_factor_default": {
+                "win_rate_multiplier": 1.0,
+                "max_drawdown_adjustment": 1.0,
+            },
+            "asset_performance_factors": {
+                "SOL/USDT": {"win_rate_multiplier": 1.0, "max_drawdown_adjustment": 1.0},
+                "BTC/USDT": {"win_rate_multiplier": 0.87, "max_drawdown_adjustment": 1.15},
+                "ETH/USDT": {"win_rate_multiplier": 0.90, "max_drawdown_adjustment": 1.10},
+            },
+        })
 
     def test_strong_buy_signal_is_valid(self, agent):
         result = agent.execute({

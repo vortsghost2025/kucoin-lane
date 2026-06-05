@@ -46,13 +46,28 @@ _DEFAULT_ASSET_PROFILES = {
                 "stop_loss_adjustment": 0.95,
                 "position_size_multiplier": 0.80,
             },
-            "ETH/USDT": {
-                "min_signal_strength_adjustment": 0.03,
-                "stop_loss_adjustment": 0.97,
-                "position_size_multiplier": 0.90,
-            },
+        "ETH/USDT": {
+            "min_signal_strength_adjustment": 0.03,
+            "stop_loss_adjustment": 0.97,
+            "position_size_multiplier": 0.90,
+        },
+        "AVAX/USDT": {
+            "min_signal_strength_adjustment": 0.06,
+            "stop_loss_adjustment": 1.15,
+            "position_size_multiplier": 0.75,
+        },
+        "DOGE/USDT": {
+            "min_signal_strength_adjustment": 0.10,
+            "stop_loss_adjustment": 1.30,
+            "position_size_multiplier": 0.60,
+        },
+        "LINK/USDT": {
+            "min_signal_strength_adjustment": 0.05,
+            "stop_loss_adjustment": 1.10,
+            "position_size_multiplier": 0.80,
         },
     },
+},
     "market": {
         "default": {
             "rsi_weight": 0.8,
@@ -73,15 +88,33 @@ _DEFAULT_ASSET_PROFILES = {
                 "volatility_adjustment": 0.05,
                 "signal_threshold_adj": 5,
             },
-            "ETH/USDT": {
-                "rsi_weight": 0.7,
-                "momentum_weight": 1.1,
-                "volatility_adjustment": 0.07,
-                "signal_threshold_adj": 3,
-            },
+        "ETH/USDT": {
+            "rsi_weight": 0.7,
+            "momentum_weight": 1.1,
+            "volatility_adjustment": 0.07,
+            "signal_threshold_adj": 3,
+        },
+        "AVAX/USDT": {
+            "rsi_weight": 0.65,
+            "momentum_weight": 1.0,
+            "volatility_adjustment": 0.12,
+            "signal_threshold_adj": 5,
+        },
+        "DOGE/USDT": {
+            "rsi_weight": 0.55,
+            "momentum_weight": 0.9,
+            "volatility_adjustment": 0.18,
+            "signal_threshold_adj": 8,
+        },
+        "LINK/USDT": {
+            "rsi_weight": 0.65,
+            "momentum_weight": 1.1,
+            "volatility_adjustment": 0.10,
+            "signal_threshold_adj": 4,
         },
     },
-    "backtest": {
+},
+"backtest": {
         "default": {
             "win_rate_multiplier": 1.0,
             "max_drawdown_adjustment": 1.0,
@@ -95,12 +128,24 @@ _DEFAULT_ASSET_PROFILES = {
                 "win_rate_multiplier": 0.87,
                 "max_drawdown_adjustment": 1.15,
             },
-            "ETH/USDT": {
-                "win_rate_multiplier": 0.90,
-                "max_drawdown_adjustment": 1.10,
-            },
+        "ETH/USDT": {
+            "win_rate_multiplier": 0.90,
+            "max_drawdown_adjustment": 1.10,
+        },
+        "AVAX/USDT": {
+            "win_rate_multiplier": 0.85,
+            "max_drawdown_adjustment": 1.15,
+        },
+        "DOGE/USDT": {
+            "win_rate_multiplier": 0.80,
+            "max_drawdown_adjustment": 1.25,
+        },
+        "LINK/USDT": {
+            "win_rate_multiplier": 0.87,
+            "max_drawdown_adjustment": 1.15,
         },
     },
+},
 }
 
 
@@ -134,23 +179,28 @@ def _load_asset_profiles():
 
 ASSET_PROFILES = _load_asset_profiles()
 
+SPOT_LONG_ONLY = os.getenv("SPOT_LONG_ONLY", "true").lower() in ("true", "1", "yes")
+STRATEGY = os.getenv("STRATEGY", "rsi_regime").lower()
+STRATEGY_PARAMS_JSON = os.getenv("STRATEGY_PARAMS_JSON", "")
 
 TRADING_CONFIG = {
-    "account_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
+    "account_balance": float(os.getenv("ACCOUNT_BALANCE", "110")),
     "paper_trading": os.getenv("PAPER_TRADING", "true").lower() == "true",
-    "trading_pairs": os.getenv("TRADING_PAIRS", "SOL/USDT,BTC/USDT,ETH/USDT").split(
+    "spot_long_only": SPOT_LONG_ONLY,
+    "strategy": STRATEGY,
+    "trading_pairs": os.getenv("TRADING_PAIRS", "BTC/USDT,ETH/USDT").split(
         ","
     ),
 }
 
 RISK_CONFIG = {
-    "risk_per_trade": float(os.getenv("RISK_PER_TRADE", "0.005")),
-    "min_risk_reward_ratio": float(os.getenv("MIN_RISK_REWARD_RATIO", "1.5")),
+    "risk_per_trade": float(os.getenv("RISK_PER_TRADE", "0.01")),
+    "min_risk_reward_ratio": float(os.getenv("MIN_RISK_REWARD_RATIO", "2.0")),
     "max_daily_loss": float(os.getenv("MAX_DAILY_LOSS", "0.05")),
-    "account_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
-    "min_signal_strength": float(os.getenv("MIN_SIGNAL_STRENGTH", "0.25")),
+    "account_balance": float(os.getenv("ACCOUNT_BALANCE", "110")),
+    "min_signal_strength": float(os.getenv("MIN_SIGNAL_STRENGTH", "0.30")),
     "min_win_rate": float(os.getenv("MIN_WIN_RATE", "0.45")),
-    "min_notional_usd": float(os.getenv("MIN_NOTIONAL_USD", "1.0")),
+    "min_notional_usd": float(os.getenv("MIN_NOTIONAL_USD", "5.0")),
     "default_stop_loss_pct": float(os.getenv("DEFAULT_STOP_LOSS_PCT", "0.02")),
     "enforce_min_position_size_only": os.getenv(
         "ENFORCE_MIN_POSITION_SIZE_ONLY", "false"
@@ -158,13 +208,15 @@ RISK_CONFIG = {
     == "true",
     "min_position_size_units": float(os.getenv("MIN_POSITION_SIZE_UNITS", "0.01")),
     "min_position_size_by_pair": {
-        "SOL/USDT": float(os.getenv("MIN_SIZE_SOL", "0.01")),
-        "BTC/USDT": float(os.getenv("MIN_SIZE_BTC", "0.0001")),
-        "ETH/USDT": float(os.getenv("MIN_SIZE_ETH", "0.001")),
+        "BTC/USDT": float(os.getenv("MIN_SIZE_BTC", "0.00001")),
+        "ETH/USDT": float(os.getenv("MIN_SIZE_ETH", "0.0001")),
+        "AVAX/USDT": float(os.getenv("MIN_SIZE_AVAX", "0.01")),
+        "DOGE/USDT": float(os.getenv("MIN_SIZE_DOGE", "1.0")),
+        "LINK/USDT": float(os.getenv("MIN_SIZE_LINK", "0.1")),
     },
     "asset_config_default": deepcopy(ASSET_PROFILES["risk"]["default"]),
     "asset_configs": deepcopy(ASSET_PROFILES["risk"]["pairs"]),
-    "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "10.0")),
+    "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "55.0")),
 }
 
 MARKET_CONFIG = {
@@ -197,7 +249,19 @@ API_CONFIG = {
 
 EXECUTION_CONFIG = {
     "paper_trading": os.getenv("PAPER_TRADING", "true").lower() == "true",
-    "max_open_positions": int(os.getenv("MAX_OPEN_POSITIONS", "1")),
+    "spot_long_only": SPOT_LONG_ONLY,
+    "max_open_positions": int(os.getenv("MAX_OPEN_POSITIONS", "2")),
+    "trailing_stop_config": {
+        "activation_pct": float(os.getenv("TRAILING_ACTIVATION_PCT", "2.0")),
+        "trail_pct": float(os.getenv("TRAILING_PCT", "1.5")),
+        "step_pct": float(os.getenv("TRAILING_STEP_PCT", "0.5")),
+    },
+    "progressive_roi_config": {
+        "roi_table": None,  # Uses DEFAULT_ROI_TABLE from trailing_stop.py
+    },
+    "custom_stoploss_config": {
+        "breakeven_activation_pct": float(os.getenv("BREAKEVEN_ACTIVATION_PCT", "1.0")),
+    },
 }
 
 ENTRY_TIMING_CONFIG = {
@@ -213,6 +277,7 @@ MONITOR_CONFIG = {
 
 REGIME_GUARD_MODE = os.getenv("REGIME_GUARD_MODE", "v1_soft_halt")
 
+
 TELEGRAM_CONFIG = {
     "bot_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
     "chat_id": os.getenv("TELEGRAM_CHAT_ID", ""),
@@ -222,14 +287,14 @@ KUCOIN_API_KEY = API_CONFIG["api_key"]
 KUCOIN_API_SECRET = API_CONFIG["api_secret"]
 KUCOIN_API_PASSPHRASE = API_CONFIG["api_passphrase"]
 
-POSITION_SIZE_USD = float(os.getenv("POSITION_SIZE_USD", "5.0"))
+POSITION_SIZE_USD = float(os.getenv("POSITION_SIZE_USD", "55.0"))
 MONITOR_INTERVAL_MIN = int(os.getenv("MONITOR_INTERVAL_MIN", "5"))
 
 DRY_RUN = TRADING_CONFIG["paper_trading"]
 LIVE_TRADING = os.getenv("LIVE_TRADING", "false").lower() == "true"
 
 
-MAX_POSITION_SIZE_USD_GLOBAL = float(os.getenv("MAX_POSITION_SIZE_USD", "10.0"))
-MAX_TRADE_LOSS_USD = float(os.getenv("MAX_TRADE_LOSS_USD", "5.0"))
-MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "10.0"))
-MIN_BALANCE_USD = float(os.getenv("MIN_BALANCE_USD", "10.0"))
+MAX_POSITION_SIZE_USD_GLOBAL = float(os.getenv("MAX_POSITION_SIZE_USD", "55.0"))
+MAX_TRADE_LOSS_USD = float(os.getenv("MAX_TRADE_LOSS_USD", "1.10"))
+MAX_DAILY_LOSS_USD = float(os.getenv("MAX_DAILY_LOSS_USD", "5.50"))
+MIN_BALANCE_USD = float(os.getenv("MIN_BALANCE_USD", "5.0"))

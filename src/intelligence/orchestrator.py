@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 
 from ..base_agent import BaseAgent, AgentStatus
-from ..config import REGIME_GUARD_MODE
+from ..config import REGIME_GUARD_MODE, SPOT_LONG_ONLY
 from ..risk.circuit_breaker import CircuitBreaker
 from ..risk.portfolio_circuit_breaker import (
     PortfolioCircuitBreaker,
@@ -40,17 +40,18 @@ from .regime_detector import RegimeDetector
 from .lead_lag import LeadLagMonitor
 from .whale_watch import WhaleWatch
 from ..data.kucoin_klines_fetcher import KuCoinKlinesFetcher
+from .strategies import StrategyFactory
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ACCOUNT_BALANCE = 10000.0
-DEFAULT_NOTIONAL_REJECTION_THRESHOLD = 10
-DEFAULT_NOTIONAL_PAUSE_DURATION_HOURS = 1.0
+DEFAULT_ACCOUNT_BALANCE = 110.0
+DEFAULT_NOTIONAL_REJECTION_THRESHOLD = 50
+DEFAULT_NOTIONAL_PAUSE_DURATION_HOURS = 0.25
 COOLDOWN_HOURS = 4
 COOLDOWN_SECONDS = COOLDOWN_HOURS * 3600
 V4_ADX_THRESHOLD = 50
 V2_CONSECUTIVE_DOWNTREND_LIMIT = 2
-MIN_ACCOUNT_BALANCE_RECOMMENDATION = 500
+MIN_ACCOUNT_BALANCE_RECOMMENDATION = 50
 LEAD_LAG_DANGER_CONFIDENCE = 1.0
 LEAD_LAG_DANGER_MULTIPLIER = 0.0
 TRENDING_DOWN_CONFIDENCE = 0.9
@@ -78,6 +79,9 @@ V4_HALT_CONFIDENCE = 0.9
 V4_HALT_MULTIPLIER = 0.0
 V4_PROBE_CONFIDENCE = 0.6
 V4_PROBE_MULTIPLIER = 0.5
+SPREAD_WARNING_THRESHOLD = 0.005
+SPREAD_REDUCTION_THRESHOLD = 0.01
+SPREAD_HIGH_THRESHOLD = 0.02
 INTEL_BOOST_CONFIDENCE_THRESHOLD = 0.6
 INTEL_BOOST_WEIGHT = 0.3
 
@@ -118,9 +122,29 @@ class IntelligenceOrchestrator(BaseAgent):
         enable_lead_lag = config.get("enable_lead_lag", True)
         enable_whale = config.get("enable_whale", True)
 
-        self.regime_detector = RegimeDetector() if enable_regime else None
+        self.timeframe = config.get("timeframe") or os.getenv("CANDLE_INTERVAL", "1hour")
+        if "timeframe" not in config:
+            config["timeframe"] = self.timeframe
+
+        self.regime_detector = RegimeDetector(timeframe=self.timeframe) if enable_regime else None
         self.lead_lag = LeadLagMonitor() if enable_lead_lag else None
         self.whale_watch = WhaleWatch() if enable_whale else None
+        
+        # Strategy signal generator (VolBreakout, Supertrend, or legacy RSI/regime)
+        strategy_name = config.get("strategy") or os.getenv("STRATEGY", "rsi_regime").lower()
+        if strategy_name in ("vol_breakout", "supertrend"):
+            strategy_params = config.get("strategy_params", {})
+            try:
+                self.strategy = StrategyFactory.create(strategy_name, strategy_params)
+                self.strategy_name = strategy_name
+                self.logger.info(f"Strategy engine: {strategy_name} (params: {strategy_params})")
+            except Exception as e:
+                self.logger.warning(f"Strategy '{strategy_name}' init failed: {e}, falling back to rsi_regime")
+                self.strategy = None
+                self.strategy_name = "rsi_regime"
+        else:
+            self.strategy = None
+            self.strategy_name = "rsi_regime"
 
         self.enabled_modules = {
             "regime": enable_regime,
@@ -149,6 +173,9 @@ class IntelligenceOrchestrator(BaseAgent):
         self._cycle_count = 0
         self._account_balance = config.get("account_balance", DEFAULT_ACCOUNT_BALANCE)
         self._start_time = time.time()
+        self._live_trading = os.getenv("LIVE_TRADING", "false").lower() == "true"
+        self._balance_cache = None
+        self._balance_cache_ts = 0.0
         self.portfolio_cb = PortfolioCircuitBreaker(
             starting_equity=self._account_balance,
             state_path=os.getenv("PORTFOLIO_CB_STATE_PATH", "portfolio_cb_state.json"),
@@ -168,7 +195,7 @@ class IntelligenceOrchestrator(BaseAgent):
 
         # Klines/OHLCV fetcher for RegimeDetector + WhaleWatch
         self._klines_fetcher: Optional[KuCoinKlinesFetcher] = None
-        self._exchange_adapter = None  # set via set_exchange_adapter()
+        self._exchange_adapter = None # set via set_exchange_adapter()
 
         self.consecutive_notional_rejections = 0
         self.notional_rejection_threshold = config.get(
@@ -288,6 +315,13 @@ class IntelligenceOrchestrator(BaseAgent):
     def is_trading_allowed(self) -> tuple[bool, Optional[str]]:
         if self.circuit_breaker_active:
             return False, "Circuit breaker is active"
+        if self.trading_paused and self.pause_timestamp:
+            elapsed_hours = (datetime.now() - self.pause_timestamp).total_seconds() / 3600
+            if elapsed_hours >= self.notional_pause_duration_hours:
+                self.resume_trading(
+                    f"Auto-resume: notional pause duration ({self.notional_pause_duration_hours}h) elapsed"
+                )
+                return True, None
         if self.trading_paused:
             return False, self.pause_reason
         return True, None
@@ -354,8 +388,7 @@ class IntelligenceOrchestrator(BaseAgent):
         self.current_stage = new_stage
         self.workflow_history.append(
             {
-"timestamp": datetime.now(timezone.utc).isoformat(),
-
+                "timestamp": datetime.now(timezone.utc).isoformat(),
                 "from_stage": old_stage.value,
                 "to_stage": new_stage.value,
                 "metadata": metadata or {},
@@ -382,7 +415,133 @@ class IntelligenceOrchestrator(BaseAgent):
         risk_agent = self.agent_registry.get("RiskManagementAgent")
         if risk_agent and hasattr(risk_agent, "update_account_balance"):
             risk_agent.update_account_balance(self._account_balance)
-            self.logger.info(f"Account balance updated from execution: {new_balance}")
+        self.logger.info(f"Account balance updated from execution: {new_balance}")
+
+    def _fetch_real_balance(self) -> Optional[float]:
+        """Fetch real USDT balance from exchange. In live mode, updates risk
+        calculations. In paper-live mode, logs real balance for transparency
+        but keeps paper balance. Cached with 300s TTL to avoid excessive API calls."""
+        import time
+        now = time.time()
+        if self._balance_cache is not None and (now - self._balance_cache_ts) < 300:
+            return self._balance_cache
+        try:
+            exec_agent = self.agent_registry.get("ExecutionAgent")
+            adapter = None
+            if exec_agent and hasattr(exec_agent, 'engine') and hasattr(exec_agent.engine, 'adapter'):
+                adapter = exec_agent.engine.adapter
+            if adapter is None:
+                return self._balance_cache
+            balance_dict = adapter.get_balance()
+            if balance_dict is None:
+                return self._balance_cache
+            real_usdt = balance_dict.get("USDT", 0.0)
+            self._balance_cache = real_usdt
+            self._balance_cache_ts = now
+            if self._live_trading:
+                if abs(real_usdt - self._account_balance) > 0.01:
+                    self.logger.info(
+                        f"Live mode: updating balance from ${self._account_balance:.2f} "
+                        f"to real exchange balance ${real_usdt:.2f} USDT"
+                    )
+                    self._account_balance = real_usdt
+                    risk_agent = self.agent_registry.get("RiskManagementAgent")
+                    if risk_agent and hasattr(risk_agent, "update_account_balance"):
+                        risk_agent.update_account_balance(real_usdt)
+            else:
+                self.logger.info(
+                    f"Paper-live mode: real exchange balance ${real_usdt:.4f} USDT, "
+                    f"paper balance ${self._account_balance:.2f} USDT"
+                )
+                if real_usdt < 10.0 and self._account_balance > 10.0:
+                    self.logger.warning(
+                        f"Real balance (${real_usdt:.4f}) is below minimum notional. "
+                        f"Paper trading continues with simulated balance. "
+                        f"Deposit USDT before enabling LIVE_TRADING=true."
+                    )
+            return real_usdt
+        except Exception as e:
+            self.logger.warning(f"Could not fetch real balance: {e}")
+            return self._balance_cache
+
+    def _fetch_ticker_data_and_calculate_spread(self, symbols: List[str]) -> Dict[str, Dict[str, Any]]:
+        """Fetch ticker data and calculate bid-ask spread for given symbols."""
+        spread_data = {}
+
+        if not self._exchange_adapter:
+            self.logger.warning("No exchange adapter available for ticker data")
+            return spread_data
+
+        try:
+            for symbol in symbols:
+                try:
+                    ticker = self._exchange_adapter.get_ticker(symbol)
+                    bid = ticker.get("bid", 0.0)
+                    ask = ticker.get("ask", 0.0)
+                    last = ticker.get("last", 0.0)
+
+                    if bid > 0 and ask > 0:
+                        spread = ask - bid
+                        spread_pct = spread / ((ask + bid) / 2) if (ask + bid) > 0 else 0
+                        mid_price = (ask + bid) / 2
+
+                        spread_data[symbol] = {
+                            "bid": bid,
+                            "ask": ask,
+                            "last": last,
+                            "spread": spread,
+                            "spread_pct": spread_pct,
+                            "mid_price": mid_price,
+                            "timestamp": time.time()
+                        }
+
+                        self.logger.debug(f"Ticker {symbol}: Bid={bid:.6f}, Ask={ask:.6f}, Spread={spread:.6f} ({spread_pct:.2%})")
+                    else:
+                        self.logger.warning(f"Invalid ticker data for {symbol}: bid={bid}, ask={ask}")
+                        spread_data[symbol] = {
+                            "error": "Invalid ticker data",
+                            "timestamp": time.time()
+                        }
+                except Exception as e:
+                    self.logger.warning(f"Failed to fetch ticker for {symbol}: {e}")
+                    spread_data[symbol] = {
+                        "error": str(e),
+                        "timestamp": time.time()
+                    }
+        except Exception as e:
+            self.logger.error(f"Error fetching ticker data: {e}")
+
+        return spread_data
+
+    def _check_spread_and_adjust_execution(self, spread_data: Dict[str, Dict[str, Any]]) -> tuple[bool, str]:
+        """Check if spreads are too wide and determine if execution should be reduced.
+
+        Returns:
+        (should_reduce_execution, reason)
+        """
+        if not spread_data:
+            return False, "No spread data available"
+
+        max_spread_pct = 0.0
+        max_spread_symbol = None
+
+        for symbol, data in spread_data.items():
+            if "spread_pct" in data:
+                spread_pct = data["spread_pct"]
+                if spread_pct > max_spread_pct:
+                    max_spread_pct = spread_pct
+                    max_spread_symbol = symbol
+
+        # Check thresholds
+        if max_spread_pct >= SPREAD_HIGH_THRESHOLD:
+            return True, f"Extreme spread detected on {max_spread_symbol}: {max_spread_pct:.2%} >= {SPREAD_HIGH_THRESHOLD:.2%}"
+        elif max_spread_pct >= SPREAD_REDUCTION_THRESHOLD:
+            return True, f"Wide spread detected on {max_spread_symbol}: {max_spread_pct:.2%} >= {SPREAD_REDUCTION_THRESHOLD:.2%}"
+        elif max_spread_pct >= SPREAD_WARNING_THRESHOLD:
+            self.logger.warning(f"Elevated spread on {max_spread_symbol}: {max_spread_pct:.2%} >= {SPREAD_WARNING_THRESHOLD:.2%}")
+            return False, f"Elevated spread warning: {max_spread_pct:.2%}"
+        else:
+            return False, f"Spread within normal bounds: {max_spread_pct:.2%}"
 
     def _validate_agent_output(
         self,
@@ -467,13 +626,15 @@ class IntelligenceOrchestrator(BaseAgent):
             "reasoning": str,
             "regime": {...},
             "lead_lag": {...},
-            "whale": {...}
+            "whale": {...},
+            "strategy": {...}  # NEW: strategy signal if enabled
         }
         """
         results: Dict[str, Any] = {
             "regime": None,
             "lead_lag": None,
             "whale": None,
+            "strategy": None,
         }
 
         if self.regime_detector:
@@ -484,6 +645,18 @@ class IntelligenceOrchestrator(BaseAgent):
 
         if self.whale_watch:
             results["whale"] = self.whale_watch.analyze_order_flow(df, order_book)
+
+        # Strategy signal (VolBreakout / Supertrend) — generates independent BUY/SELL
+        if self.strategy is not None:
+            try:
+                strategy_signal = self.strategy.generate_signal(df)
+                results["strategy"] = strategy_signal
+                self.logger.info(
+                    f"[STRATEGY] {self.strategy_name}: action={strategy_signal['action']} "
+                    f"confidence={strategy_signal['confidence']:.2f} — {strategy_signal['reasoning']}"
+                )
+            except Exception as e:
+                self.logger.warning(f"[STRATEGY] {self.strategy_name} signal failed: {e}")
 
         action, confidence, multiplier, reasoning = self._make_decision(results, symbol)
 
@@ -506,8 +679,59 @@ class IntelligenceOrchestrator(BaseAgent):
                 "LEAD-LAG DANGER: Binance cascade detected, exiting all positions",
             )
 
+        # Strategy-based decisions (VolBreakout / Supertrend) take priority
+        if results.get("strategy") and self.strategy is not None:
+            strat = results["strategy"]
+            strat_action = strat.get("action", "HOLD")
+            strat_conf = strat.get("confidence", 0.0)
+
+            # In SPOT_LONG_ONLY mode, suppress SELL signals from strategy
+            spot_long_only = self.config.get("spot_long_only", SPOT_LONG_ONLY)
+
+            if strat_action == "BUY" and strat_conf > 0.5:
+                # Check regime guard: don't buy in strong downtrend
+                if results["regime"] and results["regime"].get("recommendation") == "HALT_TRADING":
+                    return (
+                        "HOLD",
+                        strat_conf * 0.5,
+                        V1_SOFT_HALT_MULTIPLIER,
+                        f"STRATEGY {self.strategy_name} BUY suppressed by downtrend regime "
+                        f"(ADX: {results['regime']['adx']:.1f})",
+                    )
+                return (
+                    "BUY",
+                    strat_conf,
+                    1.0,
+                    f"STRATEGY {self.strategy_name}: {strat.get('reasoning', '')}",
+                )
+            elif strat_action == "SELL" and strat_conf > 0.5:
+                if spot_long_only:
+                    return (
+                        "HOLD",
+                        strat_conf,
+                        0.0,
+                        f"STRATEGY {self.strategy_name} SELL → SPOT_LONG_ONLY hold "
+                        f"({strat.get('reasoning', '')})",
+                    )
+                return (
+                    "SELL",
+                    strat_conf,
+                    1.0,
+                    f"STRATEGY {self.strategy_name}: {strat.get('reasoning', '')}",
+                )
+            # Strategy says HOLD — fall through to regime/whale logic
+
         if results["regime"]:
             regime = results["regime"]
+
+            spot_long_only = self.config.get("spot_long_only", SPOT_LONG_ONLY)
+            if spot_long_only and regime["recommendation"] == "SHORT_TREND":
+                return (
+                    "HOLD",
+                    TRENDING_DOWN_CONFIDENCE,
+                    TRENDING_DOWN_MULTIPLIER,
+                    f"SPOT_LONG_ONLY: SHORT_TREND detected (ADX: {regime['adx']:.1f}), holding — no short positions",
+                )
 
             if regime["recommendation"] == "HALT_TRADING":
                 if self.regime_guard_mode == "v1_soft_halt":
@@ -690,6 +914,10 @@ class IntelligenceOrchestrator(BaseAgent):
         try:
             self._reset_daily_risk_if_needed()
 
+            # Fetch real exchange balance: updates risk in live mode,
+            # logs for transparency in paper-live mode
+            self._fetch_real_balance()
+
             allowed, reason = self.is_trading_allowed()
             if not allowed:
                 cycle_results["final_result"] = self.create_message(
@@ -729,11 +957,6 @@ class IntelligenceOrchestrator(BaseAgent):
                 self.activate_circuit_breaker(
                     "Data fetching returned empty market data"
                 )
-                cycle_results["final_result"] = self.create_message(
-                    action="orchestrate_workflow",
-                    success=False,
-                    error="Empty market data from DataFetchingAgent",
-                )
                 return cycle_results["final_result"]
 
             self.transition_stage(WorkflowStage.ANALYZING_MARKET)
@@ -763,6 +986,26 @@ class IntelligenceOrchestrator(BaseAgent):
             # ── Klines/OHLCV Intelligence: RegimeDetector + WhaleWatch ──
             if self._klines_fetcher and self._exchange_adapter:
                 try:
+                    # === SPREAD MONITORING ===
+                    # Fetch ticker data and calculate bid-ask spreads
+                    spread_data = self._fetch_ticker_data_and_calculate_spread(list(market_data.keys()))
+
+                    # Log spread information
+                    for symbol, data in spread_data.items():
+                        if "spread_pct" in data:
+                            self.logger.info(f"[SPREAD] {symbol}: {data['spread_pct']:.2%} (bid: {data['bid']:.6f}, ask: {data['ask']:.6f})")
+                        else:
+                            self.logger.warning(f"[SPREAD] {symbol}: Unable to calculate spread - {data.get('error', 'unknown error')}")
+
+                    # Check if execution should be reduced due to wide spreads
+                    should_reduce, spread_reason = self._check_spread_and_adjust_execution(spread_data)
+                    if should_reduce:
+                        self.logger.warning(f"[SPREAD] {spread_reason} - Activating REDUCED_EXECUTION mode")
+                        cycle_results["spread_data"] = spread_data
+                        cycle_results["spread_warning"] = spread_reason
+                    else:
+                        self.logger.debug(f"[SPREAD] {spread_reason}")
+
                     for pair in market_symbols:
                         df = self._klines_fetcher.fetch_klines(
                             self._exchange_adapter, pair
@@ -773,102 +1016,102 @@ class IntelligenceOrchestrator(BaseAgent):
                             # Run whale order flow analysis
                             whale_result = self.whale_watch.analyze_order_flow(df) if self.whale_watch else None
 
-                            # Run full intelligence analysis (combines regime + whale + lead-lag)
-                            intel_analysis = self.analyze_market(df, symbol=pair)
-                            pair_analysis_from_market = analysis_data.get("analysis", {}).get(pair, {})
-                            if isinstance(pair_analysis_from_market, dict):
-                                intel_confidence = intel_analysis.get("confidence", 0.0)
-                                intel_multiplier = intel_analysis.get("position_multiplier", 1.0)
-                                intel_action = intel_analysis.get("action", "HOLD")
-                                base_strength = pair_analysis_from_market.get("signal_strength", 0.0)
-                                if intel_action in ("BUY",) and intel_confidence > INTEL_BOOST_CONFIDENCE_THRESHOLD:
-                                    boost = intel_confidence * intel_multiplier
-                                    boosted_strength = min(1.0, base_strength + boost * INTEL_BOOST_WEIGHT)
-                                    pair_analysis_from_market["signal_strength"] = boosted_strength
-                                    pair_analysis_from_market["intelligence_boost"] = {
-                                        "base_strength": base_strength,
-                                        "boost": boost * INTEL_BOOST_WEIGHT,
-                                        "intel_action": intel_action,
-                                        "intel_confidence": intel_confidence,
-                                        "intel_multiplier": intel_multiplier,
-                                    }
-                                    self.logger.info(
-                                        f"[INTELLIGENCE] {pair} signal_strength boosted: "
-                                        f"{base_strength:.3f} → {boosted_strength:.3f} "
-                                        f"(action={intel_action}, confidence={intel_confidence:.2f}, "
-                                        f"multiplier={intel_multiplier:.2f})"
-                                    )
-                                elif intel_action == "EXIT_ALL":
-                                    pair_analysis_from_market["signal_strength"] = 0.0
-                                    pair_analysis_from_market["intelligence_boost"] = {
-                                        "base_strength": base_strength,
-                                        "boost": -base_strength,
-                                        "intel_action": intel_action,
-                                        "intel_confidence": intel_confidence,
-                                        "intel_multiplier": 0.0,
-                                    }
-                                    self.logger.warning(
-                                        f"[INTELLIGENCE] {pair} signal_strength killed: "
-                                        f"EXIT_ALL from intelligence"
-                                    )
-                                pair_analysis_from_market["intelligence"] = {
-                                    "action": intel_action,
-                                    "confidence": intel_confidence,
-                                    "position_multiplier": intel_multiplier,
-                                    "reasoning": intel_analysis.get("reasoning", ""),
+                        # Run full intelligence analysis (combines regime + whale + lead-lag)
+                        intel_analysis = self.analyze_market(df, symbol=pair)
+                        pair_analysis_from_market = analysis_data.get("analysis", {}).get(pair, {})
+                        if isinstance(pair_analysis_from_market, dict):
+                            intel_confidence = intel_analysis.get("confidence", 0.0)
+                            intel_multiplier = intel_analysis.get("position_multiplier", 1.0)
+                            intel_action = intel_analysis.get("action", "HOLD")
+                            base_strength = pair_analysis_from_market.get("signal_strength", 0.0)
+        if intel_action in ("BUY",) and intel_confidence > INTEL_BOOST_CONFIDENCE_THRESHOLD:
+            boost = intel_confidence * intel_multiplier
+            boosted_strength = min(1.0, base_strength + boost * INTEL_BOOST_WEIGHT)
+            pair_analysis_from_market["signal_strength"] = boosted_strength
+            pair_analysis_from_market["intelligence_boost"] = {
+                "base_strength": base_strength,
+                "boost": boost * INTEL_BOOST_WEIGHT,
+                                    "intel_action": intel_action,
+                                    "intel_confidence": intel_confidence,
+                                    "intel_multiplier": intel_multiplier,
                                 }
-
-                            intel = {
-                                "pair": pair,
-                                "regime": regime_result,
-                                "whale": whale_result,
-                            }
-                            cycle_results["intelligence_result"] = intel
-
-                            # ADX-based regime can override the simplistic MarketAnalysisAgent regime
-                            if regime_result and regime_result.get("regime") != "UNKNOWN":
-                                adx_regime = regime_result["regime"]
-                                adx_rec = regime_result.get("recommendation", "")
                                 self.logger.info(
-                                    f"[INTELLIGENCE] ADX regime for {pair}: {adx_regime} "
-                                    f"(ADX: {regime_result.get('adx', 0):.1f}, "
-                                    f"ATR: {regime_result.get('atr_pct', 0):.2f}%, "
-                                    f"rec: {adx_rec})"
+                                    f"[INTELLIGENCE] {pair} signal_strength boosted: "
+                                    f"{base_strength:.3f} → {boosted_strength:.3f} "
+                                    f"(action={intel_action}, confidence={intel_confidence:.2f}, "
+                                    f"multiplier={intel_multiplier:.2f})"
                                 )
-                                # ADX regime can override MarketAnalysisAgent's simplistic regime
-                                # ADX is more nuanced — trust it over the simple price-based check
-                                if adx_rec == "HALT_TRADING":
-                                    market_regime = "bearish"
-                                elif adx_regime == "RANGING_HIGH_VOL":
-                                    # High vol ranging — downgrade from bullish to neutral
-                                    if market_regime == "bullish":
-                                        market_regime = "neutral"
-                                    # Upgrade from bearish to neutral — ADX says ranging, not trending down
-                                    elif market_regime == "bearish":
-                                        market_regime = "neutral"
-                                        self.logger.info(
-                                            f"[INTELLIGENCE] ADX override: {pair} bearish→neutral "
-                                            f"(ADX says RANGING_HIGH_VOL, not trending down)"
-                                        )
-                                elif adx_regime in ("RANGING_LOW_VOL", "UNKNOWN") and market_regime == "bearish":
-                                    # Low-vol ranging or unknown ADX — also upgrade bearish to neutral
+                            elif intel_action == "EXIT_ALL":
+                                pair_analysis_from_market["signal_strength"] = 0.0
+                                pair_analysis_from_market["intelligence_boost"] = {
+                                    "base_strength": base_strength,
+                                    "boost": -base_strength,
+                                    "intel_action": intel_action,
+                                    "intel_confidence": intel_confidence,
+                                    "intel_multiplier": 0.0,
+                                }
+                                self.logger.warning(
+                                    f"[INTELLIGENCE] {pair} signal_strength killed: "
+                                    f"EXIT_ALL from intelligence"
+                                )
+                            pair_analysis_from_market["intelligence"] = {
+                                "action": intel_action,
+                                "confidence": intel_confidence,
+                                "position_multiplier": intel_multiplier,
+                                "reasoning": intel_analysis.get("reasoning", ""),
+                            }
+
+                        intel = {
+                            "pair": pair,
+                            "regime": regime_result,
+                            "whale": whale_result,
+                        }
+                        cycle_results["intelligence_result"] = intel
+
+                        # ADX-based regime can override the simplistic MarketAnalysisAgent regime
+                        if regime_result and regime_result.get("regime") != "UNKNOWN":
+                            adx_regime = regime_result["regime"]
+                            adx_rec = regime_result.get("recommendation", "")
+                            self.logger.info(
+                                f"[INTELLIGENCE] ADX regime for {pair}: {adx_regime} "
+                                f"(ADX: {regime_result.get('adx', 0):.1f}, "
+                                f"ATR: {regime_result.get('atr_pct', 0):.2f}%, "
+                                f"rec: {adx_rec})"
+                            )
+                            # ADX regime can override MarketAnalysisAgent's simplistic regime
+                            # ADX is more nuanced — trust it over the simple price-based check
+                            if adx_rec == "HALT_TRADING":
+                                market_regime = "bearish"
+                            elif adx_regime == "RANGING_HIGH_VOL":
+                                # High vol ranging — downgrade from bullish to neutral
+                                if market_regime == "bullish":
+                                    market_regime = "neutral"
+                                # Upgrade from bearish to neutral — ADX says ranging, not trending down
+                                elif market_regime == "bearish":
                                     market_regime = "neutral"
                                     self.logger.info(
                                         f"[INTELLIGENCE] ADX override: {pair} bearish→neutral "
-                                        f"(ADX says {adx_regime}, not confirming downtrend)"
+                                        f"(ADX says RANGING_HIGH_VOL, not trending down)"
                                     )
-
-                            if whale_result:
+                            elif adx_regime in ("RANGING_LOW_VOL", "UNKNOWN") and market_regime == "bearish":
+                                # Low-vol ranging or unknown ADX — also upgrade bearish to neutral
+                                market_regime = "neutral"
                                 self.logger.info(
-                                    f"[INTELLIGENCE] Whale signal for {pair}: "
-                                    f"{whale_result.get('signal', 'NEUTRAL')} "
-                                    f"(CVD: {whale_result.get('cvd_ratio', 0.5):.1%})"
+                                    f"[INTELLIGENCE] ADX override: {pair} bearish→neutral "
+                                    f"(ADX says {adx_regime}, not confirming downtrend)"
                                 )
-                        else:
-                            self.logger.debug(
-                                f"[INTELLIGENCE] No OHLCV data for {pair}, "
-                                f"using MarketAnalysisAgent regime only"
+
+                        if whale_result:
+                            self.logger.info(
+                                f"[INTELLIGENCE] Whale signal for {pair}: "
+                                f"{whale_result.get('signal', 'NEUTRAL')} "
+                                f"(CVD: {whale_result.get('cvd_ratio', 0.5):.1%})"
                             )
+                    else:
+                        self.logger.debug(
+                            f"[INTELLIGENCE] No OHLCV data for {pair}, "
+                            f"using MarketAnalysisAgent regime only"
+                        )
                 except Exception as e:
                     self.logger.warning(f"[INTELLIGENCE] Klines analysis failed (non-fatal): {e}")
 
@@ -1028,11 +1271,16 @@ class IntelligenceOrchestrator(BaseAgent):
                 )
             else:
                 self.transition_stage(WorkflowStage.EXECUTING)
+                approved_pair = risk_data.get("pair")
+                exec_market_data = market_data
+                if approved_pair and approved_pair in market_data:
+                    exec_market_data = {approved_pair: market_data[approved_pair]}
                 exec_result = self._execute_agent_phase(
                     "ExecutionAgent",
                     "execute_trade",
                     {
-                        "market_data": market_data,
+                        "market_data": exec_market_data,
+                        "pair": approved_pair,
                         "position_size": risk_data.get("position_size"),
                         "stop_loss": risk_data.get("stop_loss"),
                         "take_profit": risk_data.get("take_profit"),
@@ -1040,9 +1288,11 @@ class IntelligenceOrchestrator(BaseAgent):
                         "account_balance": risk_data.get("account_balance"),
                         "position_approved": risk_data.get("position_approved", False),
                         "risk_approved": risk_data.get("position_approved", False),
+                        "analysis": analysis_data.get("analysis", {}),
+                        "backtest_results": backtest_data.get("backtest_results", {}),
                     },
                 )
-            cycle_results["exec_result"] = exec_result
+                cycle_results["exec_result"] = exec_result
 
             if not self._validate_agent_output(
                 exec_result, "ExecutionAgent", ["trade_executed"]
@@ -1286,6 +1536,6 @@ class IntelligenceOrchestrator(BaseAgent):
             "pause_reason": self.pause_reason,
             "circuit_breaker_active": self.circuit_breaker_active,
             "agents": agent_statuses,
-        "workflow_history_length": len(self.workflow_history),
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
+            "workflow_history_length": len(self.workflow_history),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }

@@ -9,14 +9,16 @@ import logging
 
 from ..base_agent import BaseAgent, AgentStatus
 from ..config import RISK_CONFIG as GLOBAL_RISK_CONFIG
+from ..utils.timeframe import apply_timeframe_overrides, resolve_timeframe
 from .kelly_criterion import KellyPositionSizer
 
-MAX_DAILY_LOSS_CAP = 0.02
+MAX_DAILY_LOSS_CAP = 0.05
 DEFAULT_MIN_POSITION_SIZE_UNITS = 0.001
 DEFAULT_ASSET_CONFIG = {
     "min_signal_strength_adjustment": 0.0,
     "stop_loss_adjustment": 1.0,
     "position_size_multiplier": 1.0,
+    "max_stop_loss_pct": 0.06,
 }
 
 
@@ -42,7 +44,7 @@ class RiskManagementAgent(BaseAgent):
         self.account_balance = float(cfg.get("account_balance", 10000.0))
         self.risk_per_trade = cfg.get("risk_per_trade", 0.01)
         self.min_risk_reward_ratio = (
-            cfg.get("min_risk_reward_ratio", 1.5)
+            cfg.get("min_risk_reward_ratio", 1.2)
         )
 
         requested_max_daily_loss = (
@@ -57,7 +59,7 @@ class RiskManagementAgent(BaseAgent):
             cfg.get("min_signal_strength", 0.3)
         )
         self.min_win_rate = cfg.get("min_win_rate", 0.45)
-        self.min_notional_usd = cfg.get("min_notional_usd", 10.0)
+        self.min_notional_usd = cfg.get("min_notional_usd", 5.0)
 
         configured_min_size = cfg.get("min_position_size_units")
         self.min_position_size_units = (
@@ -68,10 +70,11 @@ class RiskManagementAgent(BaseAgent):
 
         self.min_position_size_by_pair = cfg.get("min_position_size_by_pair", {})
         self.enforce_min_position_size_only = cfg.get(
-            "enforce_min_position_size_only", True
+            "enforce_min_position_size_only", False
         )
 
         self.cumulative_risk_today = 0.0
+        self.timeframe = resolve_timeframe(cfg)
 
         global_asset_default = GLOBAL_RISK_CONFIG.get("asset_config_default", {})
         config_asset_default = cfg.get("asset_config_default", {})
@@ -112,6 +115,7 @@ class RiskManagementAgent(BaseAgent):
 
     def execute(self, input_data: Dict[str, Any]) -> Dict[str, Any]:
         self.log_execution_start("assess_and_size_position")
+        _result = None
 
         try:
             market_data = input_data.get("market_data", {})
@@ -168,51 +172,50 @@ class RiskManagementAgent(BaseAgent):
             if all_approved:
                 self.cumulative_risk_today += total_risk
 
-            return self.create_message(
+            approved_assessment = next(
+                (
+                    (pair_key, a)
+                    for pair_key, a in risk_assessments.items()
+                    if a["position_approved"]
+                ),
+                None,
+            )
+            approved_pair = approved_assessment[0] if approved_assessment else None
+            approved_data = approved_assessment[1] if approved_assessment else {}
+
+            result_data = {
+                "position_approved": any_approved,
+                "rejection_reason": rejection_reason if not any_approved else None,
+                "assessments": risk_assessments,
+                "total_risk_amount": total_risk,
+                "total_risk_pct": (total_risk / self.account_balance) * 100,
+                "cumulative_daily_risk": self.cumulative_risk_today,
+                "account_balance": self.account_balance,
+                "pair": approved_pair,
+                "position_size": approved_data.get("position_size", 0),
+                "stop_loss": approved_data.get("stop_loss"),
+                "take_profit": approved_data.get("take_profit"),
+                "current_price": approved_data.get("current_price"),
+                "stop_loss_pct": approved_data.get("stop_loss_pct"),
+                "take_profit_pct": approved_data.get("take_profit_pct"),
+                "signal_strength": approved_data.get("signal_strength"),
+                "recommendation": approved_data.get("recommendation", "HOLD"),
+            }
+            _result = self.create_message(
                 action="assess_and_size_position",
                 success=True,
-                data={
-                    "position_approved": any_approved,
-                    "rejection_reason": rejection_reason if not any_approved else None,
-                    "assessments": risk_assessments,
-                    "total_risk_amount": total_risk,
-                    "total_risk_pct": (total_risk / self.account_balance) * 100,
-                    "cumulative_daily_risk": self.cumulative_risk_today,
-                    "account_balance": self.account_balance,
-                    "position_size": next(
-                        (
-                            a["position_size"]
-                            for a in risk_assessments.values()
-                            if a["position_approved"]
-                        ),
-                        0,
-                    ),
-                    "stop_loss": next(
-                        (
-                            a["stop_loss"]
-                            for a in risk_assessments.values()
-                            if a["position_approved"]
-                        ),
-                        None,
-                    ),
-                    "take_profit": next(
-                        (
-                            a["take_profit"]
-                            for a in risk_assessments.values()
-                            if a["position_approved"]
-                        ),
-                        None,
-                    ),
-                },
+                data=result_data,
             )
 
         except Exception as e:
             error_msg = f"Risk assessment error: {str(e)}"
             self.set_status(AgentStatus.ERROR, error_msg)
             self.log_execution_end("assess_and_size_position", success=False)
-            return self.create_message(
+            _result = self.create_message(
                 action="assess_and_size_position", success=False, error=error_msg
             )
+
+        return _result
 
     def _assess_pair_risk(
         self,
@@ -331,6 +334,9 @@ class RiskManagementAgent(BaseAgent):
             **self.asset_config_default,
             **self.asset_configs.get(pair, {}),
         }
+
+        asset_config = apply_timeframe_overrides(asset_config, self.asset_configs.get(pair, {}), self.timeframe)
+
         stop_loss_adjustment = asset_config["stop_loss_adjustment"]
         position_size_multiplier = asset_config["position_size_multiplier"]
         min_signal_strength_adjustment = asset_config["min_signal_strength_adjustment"]
@@ -340,20 +346,54 @@ class RiskManagementAgent(BaseAgent):
         )
 
         if current_regime == "sideways":
-            adjusted_min_signal_strength = max(adjusted_min_signal_strength, 0.45)
+            # Micro-account friendly: 0.35 floor (down from 0.45)
+            # At $110, we need to catch smaller edges; the edge_gate.py
+            # already filters trades that can't clear round-trip friction.
+            adjusted_min_signal_strength = max(adjusted_min_signal_strength, 0.35)
 
         if current_regime == "sideways":
-            base_stop_loss_pct = 0.015
-            stop_loss_pct = base_stop_loss_pct * stop_loss_adjustment
+            stop_loss_pct = self.default_stop_loss_pct * stop_loss_adjustment
         else:
             stop_loss_pct = self.default_stop_loss_pct * stop_loss_adjustment
+            # ATR-based stop loss: use actual volatility from klines if available
+            # This prevents guaranteed stop-outs on volatile assets (SOL moves 5-8% daily)
+            atr_pct = pair_analysis.get("atr_pct", 0) if isinstance(pair_analysis, dict) else 0
+            if atr_pct > 0:
+                # ATR stop = 2x ATR (gives price room to breathe)
+                atr_stop_pct = atr_pct * 2.0 / 100
+                # Use the WIDER of default stop or ATR stop (never narrower than default)
+                if atr_stop_pct > stop_loss_pct:
+                    stop_loss_pct = atr_stop_pct
+                    self.logger.info(
+                        f"[ATR_STOP] {pair}: ATR-based stop {atr_stop_pct:.3%} wider than default {stop_loss_pct/stop_loss_adjustment if stop_loss_adjustment else stop_loss_pct:.3%}"
+                    )
+        # Cap stop loss per pair — volatile assets (SOL) need wider stops
+        max_stop_pct = asset_config.get("max_stop_loss_pct", 0.06)
+        stop_loss_pct = min(stop_loss_pct, max_stop_pct)
 
-        stop_loss = current_price * (1 - stop_loss_pct)
-        risk_per_unit = current_price - stop_loss
+        recommendation = pair_analysis.get("recommendation", "HOLD") if isinstance(pair_analysis, dict) else "HOLD"
+        is_short = recommendation in ("SELL", "SHORT")
+        if is_short:
+            stop_loss = current_price * (1 + stop_loss_pct)
+            risk_per_unit = stop_loss - current_price
+        else:
+            stop_loss = current_price * (1 - stop_loss_pct)
+            risk_per_unit = current_price - stop_loss
 
         min_size_units = self.min_position_size_by_pair.get(
             pair, self.min_position_size_units
         )
+
+        # ── Micro-account position sizing ──
+        # For accounts < $200: signal strength + min_signal_threshold already
+        # gate WHETHER to trade. Using confidence_multiplier on top of that
+        # double-penalizes valid signals and produces unfillable rounding-dust
+        # positions (e.g. $2 notional → below exchange minimum). A trade worth
+        # taking is worth taking at full risk_per_trade allocation.
+        # For accounts >= $200: use confidence_multiplier with a 0.60 floor so
+        # we never trade rounding dust, but still scale with signal quality.
+        MICRO_ACCOUNT_THRESHOLD = 200.0
+        CONFIDENCE_FLOOR = 0.60
 
         if self.enforce_min_position_size_only:
             if min_size_units <= 0:
@@ -385,24 +425,47 @@ class RiskManagementAgent(BaseAgent):
                         entry_price=current_price,
                         kelly_pct=kelly_pct,
                     )
-                    position_size = position_size * signal_strength
+                    # Micro accounts: full Kelly, no signal reduction
+                    # Standard accounts: scale Kelly by confidence with floor
+                    if self.account_balance < MICRO_ACCOUNT_THRESHOLD:
+                        confidence_multiplier = 1.0
+                    else:
+                        confidence_multiplier = max(
+                            signal_strength * max(backtest_win_rate, 0.30),
+                            CONFIDENCE_FLOOR,
+                        )
+                    position_size = position_size * confidence_multiplier
                     actual_risk_amount = position_size * risk_per_unit
                 except Exception as kelly_err:
                     self.logger.warning(f"Kelly sizing failed, falling back to fixed: {kelly_err}")
-                    confidence_multiplier = signal_strength * backtest_win_rate
-                    actual_risk_amount = max_risk_amount * confidence_multiplier
+                    if self.account_balance < MICRO_ACCOUNT_THRESHOLD:
+                        actual_risk_amount = max_risk_amount
+                    else:
+                        confidence_multiplier = max(
+                            signal_strength * max(backtest_win_rate, 0.30),
+                            CONFIDENCE_FLOOR,
+                        )
+                        actual_risk_amount = max_risk_amount * confidence_multiplier
                     if risk_per_unit > 0:
                         position_size = actual_risk_amount / risk_per_unit
                     else:
                         position_size = 0
             else:
-                confidence_multiplier = signal_strength * backtest_win_rate
-                actual_risk_amount = max_risk_amount * confidence_multiplier
-
-            if risk_per_unit > 0:
-                position_size = actual_risk_amount / risk_per_unit
-            else:
-                position_size = 0
+                # Fixed (non-Kelly) path — most common for new/paper accounts
+                if self.account_balance < MICRO_ACCOUNT_THRESHOLD:
+                    # Micro account: use full risk_per_trade, no reduction
+                    actual_risk_amount = max_risk_amount
+                else:
+                    # Standard account: confidence-scaled with floor
+                    confidence_multiplier = max(
+                        signal_strength * max(backtest_win_rate, 0.30),
+                        CONFIDENCE_FLOOR,
+                    )
+                    actual_risk_amount = max_risk_amount * confidence_multiplier
+                if risk_per_unit > 0:
+                    position_size = actual_risk_amount / risk_per_unit
+                else:
+                    position_size = 0
 
             if position_size_multiplier != 1.0:
                 position_size = position_size * position_size_multiplier
@@ -437,27 +500,42 @@ class RiskManagementAgent(BaseAgent):
             not self.enforce_min_position_size_only
             and actual_risk_amount > max_risk_amount
         ):
-            return {
-                "pair": pair,
-                "current_price": current_price,
-                "position_size": 0,
-                "position_size_usd": 0,
-                "stop_loss": stop_loss,
-                "take_profit": 0,
-                "stop_loss_pct": stop_loss_pct * 100,
-                "take_profit_pct": 0,
-                "risk_amount": actual_risk_amount,
-                "risk_pct_of_account": (actual_risk_amount / self.account_balance)
-                * 100,
-                "signal_strength": signal_strength,
-                "backtest_win_rate": backtest_win_rate,
-                "position_approved": False,
-                "rejection_reason": "Position size exceeds max risk per trade",
-                "risk_reward_ratio": 0,
-            }
+            # Allow up to 2x max risk when position was bumped to
+            # exchange minimum size — we can't trade less than the
+            # exchange requires.  Reject only if risk exceeds 2x cap.
+            was_bumped = min_size_units > 0 and position_size <= min_size_units * 1.01
+            risk_ratio = actual_risk_amount / max_risk_amount if max_risk_amount > 0 else 999
+            if was_bumped and risk_ratio <= 2.0:
+                self.logger.info(
+                    f"{pair}: min-size bump to {position_size:.6f} causes risk "
+                    f"${actual_risk_amount:.2f} to exceed cap ${max_risk_amount:.2f} "
+                    f"({risk_ratio:.1f}x) — allowing (exchange minimum)"
+                )
+            else:
+                return {
+                    "pair": pair,
+                    "current_price": current_price,
+                    "position_size": 0,
+                    "position_size_usd": 0,
+                    "stop_loss": stop_loss,
+                    "take_profit": 0,
+                    "stop_loss_pct": stop_loss_pct * 100,
+                    "take_profit_pct": 0,
+                    "risk_amount": actual_risk_amount,
+                    "risk_pct_of_account": (actual_risk_amount / self.account_balance)
+                    * 100,
+                    "signal_strength": signal_strength,
+                    "backtest_win_rate": backtest_win_rate,
+                    "position_approved": False,
+                    "rejection_reason": "Position size exceeds max risk per trade",
+                    "risk_reward_ratio": 0,
+                }
 
         take_profit_pct = stop_loss_pct * self.min_risk_reward_ratio
-        take_profit = current_price * (1 + take_profit_pct)
+        if is_short:
+            take_profit = current_price * (1 - take_profit_pct)
+        else:
+            take_profit = current_price * (1 + take_profit_pct)
 
         if position_size_usd < self.min_notional_usd:
             return {

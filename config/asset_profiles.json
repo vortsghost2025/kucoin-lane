@@ -3,13 +3,15 @@
     "default": {
       "min_signal_strength_adjustment": 0.0,
       "stop_loss_adjustment": 1.0,
-      "position_size_multiplier": 1.0
+      "position_size_multiplier": 1.0,
+      "max_stop_loss_pct": 0.06
     },
     "pairs": {
       "SOL/USDT": {
-        "min_signal_strength_adjustment": 0.0,
-        "stop_loss_adjustment": 1.0,
-        "position_size_multiplier": 1.0
+        "min_signal_strength_adjustment": 0.08,
+        "stop_loss_adjustment": 1.5,
+        "position_size_multiplier": 0.70,
+        "max_stop_loss_pct": 0.10
       },
       "BTC/USDT": {
         "min_signal_strength_adjustment": 0.05,
@@ -18,8 +20,32 @@
       },
       "ETH/USDT": {
         "min_signal_strength_adjustment": 0.03,
-        "stop_loss_adjustment": 0.97,
-        "position_size_multiplier": 0.9
+        "stop_loss_adjustment": 1.20,
+        "position_size_multiplier": 0.9,
+        "timeframe_overrides": {
+          "6hour": {
+            "stop_loss_adjustment": 0.97,
+            "position_size_multiplier": 0.9
+          }
+        }
+      },
+      "AVAX/USDT": {
+        "min_signal_strength_adjustment": 0.06,
+        "stop_loss_adjustment": 1.15,
+        "position_size_multiplier": 0.75,
+        "max_stop_loss_pct": 0.08
+      },
+      "DOGE/USDT": {
+        "min_signal_strength_adjustment": 0.10,
+        "stop_loss_adjustment": 1.30,
+        "position_size_multiplier": 0.60,
+        "max_stop_loss_pct": 0.10
+      },
+      "LINK/USDT": {
+        "min_signal_strength_adjustment": 0.05,
+        "stop_loss_adjustment": 1.10,
+        "position_size_multiplier": 0.80,
+        "max_stop_loss_pct": 0.07
       }
     }
   },
@@ -32,10 +58,10 @@
     },
     "pairs": {
       "SOL/USDT": {
-        "rsi_weight": 0.8,
-        "momentum_weight": 1.0,
-        "volatility_adjustment": 0.1,
-        "signal_threshold_adj": 0
+        "rsi_weight": 0.6,
+        "momentum_weight": 0.8,
+        "volatility_adjustment": 0.15,
+        "signal_threshold_adj": 8
       },
       "BTC/USDT": {
         "rsi_weight": 0.6,
@@ -44,10 +70,36 @@
         "signal_threshold_adj": 5
       },
       "ETH/USDT": {
-        "rsi_weight": 0.7,
+        "rsi_weight": 0.6,
+        "momentum_weight": 1.2,
+        "volatility_adjustment": 0.10,
+        "signal_threshold_adj": 6,
+        "timeframe_overrides": {
+          "6hour": {
+            "signal_threshold_adj": 3,
+            "momentum_weight": 1.1,
+            "rsi_weight": 0.7,
+            "volatility_adjustment": 0.07
+          }
+        }
+      },
+      "AVAX/USDT": {
+        "rsi_weight": 0.65,
+        "momentum_weight": 1.0,
+        "volatility_adjustment": 0.12,
+        "signal_threshold_adj": 5
+      },
+      "DOGE/USDT": {
+        "rsi_weight": 0.55,
+        "momentum_weight": 0.9,
+        "volatility_adjustment": 0.18,
+        "signal_threshold_adj": 8
+      },
+      "LINK/USDT": {
+        "rsi_weight": 0.65,
         "momentum_weight": 1.1,
-        "volatility_adjustment": 0.07,
-        "signal_threshold_adj": 3
+        "volatility_adjustment": 0.10,
+        "signal_threshold_adj": 4
       }
     }
   },
@@ -58,16 +110,34 @@
     },
     "pairs": {
       "SOL/USDT": {
-        "win_rate_multiplier": 1.0,
-        "max_drawdown_adjustment": 1.0
+        "win_rate_multiplier": 0.85,
+        "max_drawdown_adjustment": 1.20
       },
       "BTC/USDT": {
         "win_rate_multiplier": 0.87,
         "max_drawdown_adjustment": 1.15
       },
       "ETH/USDT": {
-        "win_rate_multiplier": 0.9,
-        "max_drawdown_adjustment": 1.1
+        "win_rate_multiplier": 0.87,
+        "max_drawdown_adjustment": 1.15,
+        "timeframe_overrides": {
+          "6hour": {
+            "win_rate_multiplier": 0.90,
+            "max_drawdown_adjustment": 1.10
+          }
+        }
+      },
+      "AVAX/USDT": {
+        "win_rate_multiplier": 0.85,
+        "max_drawdown_adjustment": 1.15
+      },
+      "DOGE/USDT": {
+        "win_rate_multiplier": 0.80,
+        "max_drawdown_adjustment": 1.25
+      },
+      "LINK/USDT": {
+        "win_rate_multiplier": 0.87,
+        "max_drawdown_adjustment": 1.15
       }
     }
   }

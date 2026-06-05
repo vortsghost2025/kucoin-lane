@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..base_agent import BaseAgent, AgentStatus
+from ..trading.paper_trade_ledger import PaperTradeLedger
 from ..config import (
     KUCOIN_API_KEY,
     KUCOIN_API_SECRET,
@@ -36,10 +37,14 @@ from ..config import (
     MONITOR_INTERVAL_MIN,
     DRY_RUN,
     LIVE_TRADING,
+    SPOT_LONG_ONLY,
+    EXECUTION_CONFIG,
 )
 from .exchange_adapter import ExchangeAdapter, KuCoinAdapter
 from ..risk.circuit_breaker import CircuitBreaker
 from ..risk.portfolio_circuit_breaker import PortfolioCircuitBreaker, CircuitBreakTriggered
+from ..utils.timeframe import resolve_timeframe, DEFAULT_TIMEFRAME
+from .trailing_stop import TrailingStopManager, ProgressiveROI, CustomStopLoss
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +91,8 @@ class TradeStatus(Enum):
 class ExecutionEngine(ABC):
     """Base class for execution engines with heartbeat and continuous loop."""
 
+    MIN_PROFIT_TO_HOLD_PCT = 1.0
+
     def __init__(self, config: Dict[str, Any]) -> None:
         self.config = config
         mode_suffix = "dry_run" if "DryRun" in self.__class__.__name__ else "live"
@@ -104,6 +111,9 @@ class ExecutionEngine(ABC):
         self.winning_trades = 0
         self.losing_trades = 0
         self.portfolio_cb = None
+        self.trailing_stop = TrailingStopManager(config.get("trailing_stop_config"))
+        self.progressive_roi = ProgressiveROI(config.get("progressive_roi_config"))
+        self.custom_stoploss = CustomStopLoss(config.get("custom_stoploss_config"))
         self._last_runtime_status: str = "initializing"
         logger.info(
             f"ExecutionEngine initialized - using heartbeat: {self.heartbeat_file}"
@@ -245,7 +255,7 @@ class ExecutionEngine(ABC):
                             current_equity = float(self.config.get("account_balance", 0))
                             if current_equity <= 0:
                                 total_pnl = self._get_total_pnl()
-                                current_equity = float(self.config.get("position_size_usd", 10000.0)) + total_pnl
+                                current_equity = float(self.config.get("position_size_usd", 55.0)) + total_pnl
                             self.portfolio_cb.check(current_equity)
                         except CircuitBreakTriggered as cb_err:
                             self.log("warning", f"[PORTFOLIO CB] Tripped: {cb_err}")
@@ -319,8 +329,13 @@ class ExecutionEngine(ABC):
             self.log("warning", f"Trade {trade_id} not found")
             return {}
 
-        pnl = (exit_price - trade["entry_price"]) * trade["position_size"]
-        pnl_pct = (exit_price - trade["entry_price"]) / trade["entry_price"] * 100
+        direction = trade.get("direction", "long")
+        if direction == "short":
+            pnl = (trade["entry_price"] - exit_price) * trade["position_size"]
+            pnl_pct = (trade["entry_price"] - exit_price) / trade["entry_price"] * 100
+        else:
+            pnl = (exit_price - trade["entry_price"]) * trade["position_size"]
+            pnl_pct = (exit_price - trade["entry_price"]) / trade["entry_price"] * 100
 
         trade["exit_price"] = exit_price
         trade["exit_time"] = datetime.now(timezone.utc).isoformat()
@@ -342,6 +357,81 @@ class ExecutionEngine(ABC):
         )
         return trade
 
+    def _handle_spot_long_only_sell(self, pair: str, recommendation: str, current_price: float) -> Optional[Dict[str, Any]]:
+        """Handle SELL/SHORT signal in spot-long-only mode.
+
+        If spot_long_only is enabled and the signal is SELL/SHORT:
+        - If position profit < MIN_PROFIT_TO_HOLD_PCT → close to protect capital
+        - If position profit >= MIN_PROFIT_TO_HOLD_PCT → hold through SELL signal,
+          let trailing stop / TP / progressive ROI manage exit
+        - Return skip dict (no new short position)
+
+        Returns None if the signal should proceed normally (BUY/HOLD or spot_long_only disabled).
+        """
+        spot_long_only = self.config.get("spot_long_only", SPOT_LONG_ONLY)
+        if not spot_long_only or recommendation not in ("SELL", "SHORT"):
+            return None
+
+        existing = [p for p in self.open_positions if p.get("pair") == pair and p.get("direction", "long") == "long"]
+        if not existing:
+            self.log("info", f"[SPOT_LONG_ONLY] SELL signal for {pair} — no long position to close, skipping")
+            return {
+                "agent": self.__class__.__name__,
+                "action": "execute_trade",
+                "success": True,
+                "data": {
+                    "trade_executed": False,
+                    "reason": "spot_long_only: SELL/SHORT signals close longs or skip",
+                    "pair": pair,
+                    "closed_positions": 0,
+                },
+            }
+
+        positions_to_close = []
+        positions_to_hold = []
+
+        for pos in existing:
+            entry = pos.get("entry_price", 0)
+            if entry <= 0:
+                positions_to_close.append(pos)
+                continue
+            profit_pct = (current_price - entry) / entry * 100.0
+            if profit_pct < self.MIN_PROFIT_TO_HOLD_PCT:
+                positions_to_close.append(pos)
+            else:
+                positions_to_hold.append(pos)
+                logger.info(
+                    f"[SPOT_LONG_ONLY] Holding {pair} long through SELL signal: "
+                    f"profit {profit_pct:.2f}% >= {self.MIN_PROFIT_TO_HOLD_PCT}% threshold — "
+                    f"trailing stop / TP / ROI will manage exit"
+                )
+
+        for pos in positions_to_close:
+            profit_pct = (current_price - pos.get("entry_price", 0)) / pos.get("entry_price", 1) * 100.0
+            logger.info(
+                f"[SPOT_LONG_ONLY] Closing {pair} long on SELL signal: "
+                f"profit {profit_pct:.2f}% < {self.MIN_PROFIT_TO_HOLD_PCT}% threshold"
+            )
+            self._close_spot_long_position(pos, pair, current_price)
+
+        return {
+            "agent": self.__class__.__name__,
+            "action": "execute_trade",
+            "success": True,
+            "data": {
+                "trade_executed": False,
+                "reason": "spot_long_only: SELL/SHORT signals close longs or skip",
+                "pair": pair,
+                "closed_positions": len(positions_to_close),
+                "held_positions": len(positions_to_hold),
+            },
+        }
+
+    def _close_spot_long_position(self, pos: Dict, pair: str, current_price: float):
+        """Close a spot-long position. Override in subclasses for exchange-specific behavior."""
+        close_result = self.close_position(pos["trade_id"], current_price, "spot_long_only_sell_signal")
+        self.log("info", f"[SPOT_LONG_ONLY] Closed trade {pos['trade_id']}: {close_result}")
+
     def update_open_positions(
         self, current_prices: Dict[str, float]
     ) -> List[Dict[str, Any]]:
@@ -354,21 +444,73 @@ class ExecutionEngine(ABC):
                 continue
 
             current_price = current_prices[pair]
-            pnl = (current_price - trade["entry_price"]) * trade["position_size"]
-            pnl_pct = (
-                (current_price - trade["entry_price"]) / trade["entry_price"] * 100
-            )
+            direction = trade.get("direction", "long")
+            if direction == "short":
+                pnl = (trade["entry_price"] - current_price) * trade["position_size"]
+                pnl_pct = (trade["entry_price"] - current_price) / trade["entry_price"] * 100
+            else:
+                pnl = (current_price - trade["entry_price"]) * trade["position_size"]
+                pnl_pct = (current_price - trade["entry_price"]) / trade["entry_price"] * 100
             trade["pnl"] = pnl
             trade["pnl_pct"] = pnl_pct
 
-            if current_price <= trade["stop_loss"]:
-                trades_to_close.append((trade["trade_id"], current_price, "stop_loss"))
-            elif current_price >= trade["take_profit"]:
-                trades_to_close.append(
-                    (trade["trade_id"], current_price, "take_profit")
-                )
+            # ── Custom stoploss: move SL to break-even if profit ≥ threshold ──
+            original_sl = trade["stop_loss"]
+            be_result = self.custom_stoploss.check(
+                entry_price=trade["entry_price"],
+                current_price=current_price,
+                original_sl=original_sl,
+                direction=direction,
+            )
+            trade["breakeven_active"] = be_result["breakeven_active"]
+            trade["unrealized_pct"] = be_result["unrealized_pct"]
+            sl_after_breakeven = be_result["stop_loss"]
+
+            # ── Trailing stop: ratchet SL upward as price advances ──
+            psar_val = trade.get("psar_value")
+            trail_result = self.trailing_stop.update(
+                trade_id=trade["trade_id"],
+                entry_price=trade["entry_price"],
+                current_price=current_price,
+                original_sl=sl_after_breakeven,
+                direction=direction,
+                psar_value=psar_val,
+            )
+            effective_sl = trail_result["stop_loss"]
+            trade["effective_stop_loss"] = effective_sl
+            trade["trailing_active"] = trail_result["trailing_active"]
+            trade["high_water"] = trail_result["high_water"]
+
+            # ── Progressive ROI: time-based TP that tightens over time ──
+            entry_time_iso = trade.get("entry_time", "")
+            roi_exit, current_pct, target_pct, minutes_held = self.progressive_roi.check(
+                entry_time_iso=entry_time_iso,
+                current_price=current_price,
+                entry_price=trade["entry_price"],
+            )
+            trade["roi_target_pct"] = target_pct
+            trade["minutes_held"] = minutes_held
+
+            # ── Exit logic ──
+            if direction == "short":
+                if current_price >= effective_sl:
+                    reason = "trailing_stop" if trail_result["trailing_active"] else "stop_loss"
+                    trades_to_close.append((trade["trade_id"], current_price, reason))
+                elif current_price <= trade["take_profit"]:
+                    trades_to_close.append((trade["trade_id"], current_price, "take_profit"))
+                elif roi_exit:
+                    trades_to_close.append((trade["trade_id"], current_price, "progressive_roi"))
+            else:
+                if current_price <= effective_sl:
+                    reason = "trailing_stop" if trail_result["trailing_active"] else "stop_loss"
+                    trades_to_close.append((trade["trade_id"], current_price, reason))
+                elif current_price >= trade["take_profit"]:
+                    trades_to_close.append((trade["trade_id"], current_price, "take_profit"))
+                elif roi_exit:
+                    trades_to_close.append((trade["trade_id"], current_price, "progressive_roi"))
 
         for trade_id, exit_price, reason in trades_to_close:
+            self.trailing_stop.remove(trade_id)
             closed = self.close_position(trade_id, exit_price, reason)
             closed_trades.append(closed)
 
@@ -430,6 +572,15 @@ class DryRunExecutor(ExecutionEngine):
         self.max_trades_per_session = config.get("max_trades_per_session", 2)
         self.load_backtest_data()
 
+        # Paper trade ledger — persistent tracking across restarts
+        self.ledger = PaperTradeLedger(
+            filepath=config.get("paper_ledger_path", "paper_trades_ledger.json"),
+            initial_balance=float(config.get("account_balance", 110)),
+        )
+        self.log("info", f"Paper trade ledger initialized ({len(self.ledger.get_closed_trades())} historical trades)")
+
+        self._paper_balance = float(self.config.get("account_balance", 110))
+
         self.orchestrator = None
         if config.get("paper_live", True):
             try:
@@ -442,6 +593,7 @@ class DryRunExecutor(ExecutionEngine):
                 orch_config = dict(config)
                 orch_config["paper_trading"] = True
                 orch_config["paper_live"] = False
+                orch_config.setdefault("timeframe", resolve_timeframe(orch_config))
                 self.orchestrator = IntelligenceOrchestrator(orch_config)
                 self.orchestrator.register_agent(DataFetchingAgent(orch_config))
                 self.orchestrator.register_agent(MarketAnalysisAgent(orch_config))
@@ -470,6 +622,19 @@ class DryRunExecutor(ExecutionEngine):
                 self.log("warning", f"Orchestrator wiring failed, falling back to CSV-only: {e}")
                 self.orchestrator = None
 
+    def close_position(self, trade_id: int, exit_price: float, reason: str) -> Dict[str, Any]:
+        trade = super().close_position(trade_id, exit_price, reason)
+        if not trade:
+            return trade
+        pnl = trade.get("pnl", 0.0)
+        self._paper_balance += pnl
+        self.config["account_balance"] = self._paper_balance
+        logger.info(
+            f"[DRY-RUN] Paper balance updated: ${self._paper_balance - pnl:.2f} → ${self._paper_balance:.2f} "
+            f"(P&L: ${pnl:+.2f})"
+        )
+        return trade
+
     def load_backtest_data(self) -> None:
         self.log("info", "Loading backtest data from CSV files...")
         self.backtest_data = {}
@@ -490,7 +655,7 @@ class DryRunExecutor(ExecutionEngine):
         if self.orchestrator is not None:
             self.log("info", "Running paper-live strategy cycle with live market data...")
             try:
-                symbols = self.config.get("trading_pairs", ["SOL/USDT", "BTC/USDT", "ETH/USDT"])
+                symbols = self.config.get("trading_pairs", ["BTC/USDT", "ETH/USDT", "AVAX/USDT", "DOGE/USDT", "LINK/USDT"])
                 result = self.orchestrator.execute(market_symbols=symbols)
                 if isinstance(result, dict):
                     data = result.get("data", {})
@@ -500,6 +665,26 @@ class DryRunExecutor(ExecutionEngine):
                         self.log("info", f"Paper trade executed: {data.get('execution', {})}")
                     else:
                         self.log("info", f"No trade this cycle: {reason}")
+
+                # Monitor open ledger positions against current market prices
+                try:
+                    # Get current prices from the data fetching phase
+                    data_result = self.orchestrator.workflow_trace[0] if self.orchestrator.workflow_trace else {}
+                    if isinstance(data_result, dict):
+                        market_data = data_result.get("data", {}).get("market_data", {})
+                        current_prices = {}
+                        for pair, info in market_data.items():
+                            if isinstance(info, dict):
+                                price = info.get("current_price", 0)
+                                if price > 0:
+                                    current_prices[pair] = price
+                        if current_prices:
+                            closed = self.ledger.monitor_open_positions(current_prices)
+                            for ct in closed:
+                                self.log("info", f"[LEDGER] Auto-closed: #{ct['trade_id']} {ct['pair']} ${ct['net_pnl_usd']:+.4f} ({ct['exit_reason']})")
+                except Exception as ledger_err:
+                    self.log("warning", f"Ledger monitoring failed (non-fatal): {ledger_err}")
+
             except Exception as e:
                 self.log("error", f"Orchestrator cycle error: {e}")
         else:
@@ -520,24 +705,40 @@ class DryRunExecutor(ExecutionEngine):
                 "agent": "DryRunExecutor",
                 "action": "execute_trade",
                 "success": True,
-                "data": {"trade_executed": False, "reason": "Invalid position size"},
+                "data": {"trade_executed": False, "reason": "Invalid position size", "account_balance": self._paper_balance},
             }
 
-        pair = list(market_data.keys())[0]
-        market_info = market_data[pair]
+        pair = input_data.get("pair") or list(market_data.keys())[0]
+        market_info = market_data.get(pair, list(market_data.values())[0] if market_data else {})
         entry_price = market_info.get("current_price", 0)
+
+        analysis_data = input_data.get("analysis", {})
+        pair_analysis = analysis_data.get(pair, {})
+        recommendation = pair_analysis.get("recommendation", "HOLD")
+
+        sell_result = self._handle_spot_long_only_sell(pair, recommendation, entry_price)
+        if sell_result is not None:
+            sell_result.setdefault("data", {})["account_balance"] = self._paper_balance
+            return sell_result
+
+        spot_long_only = self.config.get("spot_long_only", SPOT_LONG_ONLY)
+        if spot_long_only:
+            direction = "long"
+        else:
+            direction = "short" if recommendation in ("SELL", "SHORT") else "long"
 
         trade = {
             "trade_id": self.total_trades + 1,
             "pair": pair,
             "entry_price": entry_price,
             "position_size": position_size,
-    "entry_value": entry_price * position_size,
-    "stop_loss": stop_loss,
-    "take_profit": take_profit,
-    "entry_time": datetime.now(timezone.utc).isoformat(),
-    "status": TradeStatus.OPEN.value,
-    "paper_trading": True,
+                "entry_value": entry_price * position_size,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "entry_time": datetime.now(timezone.utc).isoformat(),
+                "status": TradeStatus.OPEN.value,
+                "direction": direction,
+                "paper_trading": True,
             "pnl": 0,
             "pnl_pct": 0,
             "exit_price": None,
@@ -558,6 +759,30 @@ class DryRunExecutor(ExecutionEngine):
             f"SL: {stop_loss:.4f} | TP: {take_profit:.4f}",
         )
 
+        # Record in persistent ledger
+        try:
+            backtest_results = input_data.get("backtest_results", {})
+            pair_backtest = backtest_results.get(pair, {})
+            backtest_win_rate = pair_backtest.get("win_rate", 0.0)
+            backtest_data_source = pair_backtest.get("data_source", "")
+            self.ledger.open_trade(
+                pair=pair,
+                direction=direction,
+                entry_price=entry_price,
+                position_size=position_size,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                signal_strength=pair_analysis.get("signal_strength", 0),
+                regime=pair_analysis.get("regime", ""),
+                intelligence_confidence=pair_analysis.get("intelligence", {}).get("confidence", 0),
+                intelligence_action=pair_analysis.get("intelligence", {}).get("action", ""),
+                backtest_win_rate=backtest_win_rate,
+                backtest_data_source=backtest_data_source,
+                metadata={"source": "dry_run_cycle", "recommendation": recommendation},
+            )
+        except Exception as ledger_err:
+            self.log("warning", f"Ledger recording failed (non-fatal): {ledger_err}")
+
         return {
             "agent": "DryRunExecutor",
             "action": "execute_trade",
@@ -573,8 +798,9 @@ class DryRunExecutor(ExecutionEngine):
                 "take_profit": take_profit,
                 "paper_trading": True,
                 "open_positions_count": len(self.open_positions),
-            },
-        }
+                "account_balance": self._paper_balance,
+        },
+    }
 
 
 class LiveExecutor(ExecutionEngine):
@@ -677,7 +903,8 @@ class LiveExecutor(ExecutionEngine):
         try:
             account_balance = self.adapter.get_balance()
             if account_balance is not None:
-                self.log("info", f"Account balance: ${account_balance:.2f} USDT")
+                usdt_balance = account_balance.get("USDT", 0.0)
+                self.log("info", f"Account balance: ${usdt_balance:.2f} USDT")
         except Exception as e:
             self.log("warning", f"Could not fetch balance: {e}")
 
@@ -742,9 +969,17 @@ class LiveExecutor(ExecutionEngine):
                 "data": {"trade_executed": False, "reason": session_limit_reason},
             }
 
-        pair = list(market_data.keys())[0]
-        market_info = market_data[pair]
+        pair = input_data.get("pair") or list(market_data.keys())[0]
+        market_info = market_data.get(pair, list(market_data.values())[0] if market_data else {})
         entry_price = market_info.get("current_price", 0)
+
+        analysis_data = input_data.get("analysis", {})
+        pair_analysis = analysis_data.get(pair, {})
+        recommendation = pair_analysis.get("recommendation", "HOLD")
+
+        sell_result = self._handle_spot_long_only_sell(pair, recommendation, entry_price)
+        if sell_result is not None:
+            return sell_result
 
         rejection_reason = self._validate_live_trade(
             entry_price=entry_price,
@@ -764,9 +999,10 @@ class LiveExecutor(ExecutionEngine):
         order_details = None
         try:
             self.log("warning", "LIVE TRADING ACTIVATED - Placing real order")
+            side = "buy"
             order_details = self.adapter.place_order(
                 pair=pair,
-                side="buy",
+                side=side,
                 size=position_size,
                 order_type=self.order_type,
                 price=entry_price if self.order_type == "limit" else None,
@@ -860,12 +1096,13 @@ class LiveExecutor(ExecutionEngine):
             "pair": pair,
             "entry_price": entry_price,
             "position_size": position_size,
-    "entry_value": entry_price * position_size,
-    "stop_loss": stop_loss,
-    "take_profit": take_profit,
-    "entry_time": datetime.now(timezone.utc).isoformat(),
-    "status": TradeStatus.OPEN.value,
-    "paper_trading": False,
+                "entry_value": entry_price * position_size,
+                "stop_loss": stop_loss,
+                "take_profit": take_profit,
+                "entry_time": datetime.now(timezone.utc).isoformat(),
+                "status": TradeStatus.OPEN.value,
+                "direction": "long",
+                "paper_trading": False,
             "pnl": 0,
             "pnl_pct": 0,
             "exit_price": None,
@@ -904,6 +1141,26 @@ class LiveExecutor(ExecutionEngine):
             },
         }
 
+    def _close_spot_long_position(self, pos: Dict, pair: str, current_price: float):
+        """Close a spot-long position on the exchange, then update internal state."""
+        order_ok = False
+        try:
+            self.adapter.place_order(
+                pair=pair,
+                side="sell",
+                size=pos["position_size"],
+                order_type=self.order_type,
+                price=current_price if self.order_type == "limit" else None,
+            )
+            order_ok = True
+        except Exception as e:
+            self.log("error", f"[SPOT_LONG_ONLY] Failed to place close-sell order for trade {pos['trade_id']}: {e}")
+        if order_ok:
+            close_result = self.close_position(pos["trade_id"], current_price, "spot_long_only_sell_signal")
+            self.log("info", f"[SPOT_LONG_ONLY] Closed trade {pos['trade_id']}: {close_result}")
+        else:
+            self.log("warning", f"[SPOT_LONG_ONLY] Trade {pos['trade_id']} still open on exchange — close-sell failed, will retry next cycle")
+
     def _check_existing_positions_at_startup(self) -> None:
         if not self.adapter:
             return
@@ -912,12 +1169,14 @@ class LiveExecutor(ExecutionEngine):
                 "info", "Checking for existing positions and unexpected balances..."
             )
             account_balance = self.adapter.get_balance()
-            if account_balance is not None and account_balance > 0:
-                msg = (
-                    f"<b>ALERT: Existing Account Balance Detected</b>\n"
-                    f"Balance: ${account_balance:.2f} USDT\n"
-                    f"Bot will manage this balance."
-                )
+            if account_balance is not None:
+                usdt_balance = account_balance.get("USDT", 0.0)
+                if usdt_balance > 0:
+                    msg = (
+                        f"<b>ALERT: Existing Account Balance Detected</b>\n"
+                        f"Balance: ${usdt_balance:.2f} USDT\n"
+                        f"Bot will manage this balance."
+                    )
                 send_telegram_notification(msg)
             else:
                 self.log("info", "No unexpected positions - account clean")
@@ -988,15 +1247,26 @@ def select_executor(dry_run: bool, live_trading: bool) -> ExecutionEngine:
         "dry_run": dry_run,
         "live_trading": live_trading,
         "paper_live": True,
+        "spot_long_only": SPOT_LONG_ONLY,
         "position_size_usd": float(POSITION_SIZE_USD),
         "monitor_interval_min": int(MONITOR_INTERVAL_MIN),
-        "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "10.0")),
-        "max_trade_loss_usd": float(os.getenv("MAX_TRADE_LOSS_USD", "5.0")),
-        "max_daily_loss_usd": float(os.getenv("MAX_DAILY_LOSS_USD", "10.0")),
-        "min_balance_usd": float(os.getenv("MIN_BALANCE_USD", "10.0")),
+        "max_position_size_usd": float(os.getenv("MAX_POSITION_SIZE_USD", "55.0")),
+        "max_trade_loss_usd": float(os.getenv("MAX_TRADE_LOSS_USD", "1.10")),
+        "max_daily_loss_usd": float(os.getenv("MAX_DAILY_LOSS_USD", "3.30")),
+        "min_balance_usd": float(os.getenv("MIN_BALANCE_USD", "5.0")),
         "paper_trading": dry_run,
-        "account_balance": float(os.getenv("ACCOUNT_BALANCE", "10000")),
-        "trading_pairs": os.getenv("TRADING_PAIRS", "SOL/USDT,BTC/USDT,ETH/USDT").split(","),
+        "account_balance": float(os.getenv("ACCOUNT_BALANCE", "110")),
+        "trading_pairs": os.getenv("TRADING_PAIRS", "BTC/USDT,ETH/USDT").split(","),
+        "min_notional_usd": float(os.getenv("MIN_NOTIONAL_USD", "5.0")),
+        "risk_per_trade": float(os.getenv("RISK_PER_TRADE", "0.01")),
+        "min_risk_reward_ratio": float(os.getenv("MIN_RISK_REWARD_RATIO", "1.2")),
+        "max_daily_loss": float(os.getenv("MAX_DAILY_LOSS", "0.03")),
+        "min_signal_strength": float(os.getenv("MIN_SIGNAL_STRENGTH", "0.30")),
+        "min_win_rate": float(os.getenv("MIN_WIN_RATE", "0.45")),
+        "default_stop_loss_pct": float(os.getenv("DEFAULT_STOP_LOSS_PCT", "0.02")),
+        "trailing_stop_config": EXECUTION_CONFIG.get("trailing_stop_config"),
+        "progressive_roi_config": EXECUTION_CONFIG.get("progressive_roi_config"),
+        "custom_stoploss_config": EXECUTION_CONFIG.get("custom_stoploss_config"),
     }
 
     if dry_run:

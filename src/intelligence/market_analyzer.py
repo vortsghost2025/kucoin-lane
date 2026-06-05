@@ -6,12 +6,13 @@ Includes entry timing validation to prevent mid-downswing purchases.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from enum import Enum
 
 from ..base_agent import BaseAgent, AgentStatus
 from ..config import MARKET_CONFIG as GLOBAL_MARKET_CONFIG
 from ..entry_timing import EntryTimingValidator
+from ..utils.timeframe import apply_timeframe_overrides, resolve_timeframe
 
 
 class MarketRegime(Enum):
@@ -51,6 +52,7 @@ class MarketAnalysisAgent(BaseAgent):
         self.macd_slow = cfg.get("macd_slow", 26)
         self.macd_signal = cfg.get("macd_signal", 9)
         self.downtrend_threshold = cfg.get("downtrend_threshold", -5)
+        self.timeframe = resolve_timeframe(cfg)
 
         global_asset_default = GLOBAL_MARKET_CONFIG.get("asset_config_default", {})
         config_asset_default = cfg.get("asset_config_default", {})
@@ -158,7 +160,7 @@ class MarketAnalysisAgent(BaseAgent):
         price_change_24h = data.get("price_change_24h_pct", 0)
         volume_24h = data.get("volume_24h", 0)
 
-        rsi = self._calculate_rsi_simple(price_change_24h)
+        rsi = self._calculate_rsi(data)
         macd_signal = self._calculate_macd_simple(price_change_24h)
         trend = self._determine_trend(price_change_24h, rsi)
         volatility = self._classify_volatility(price_change_24h)
@@ -168,8 +170,10 @@ class MarketAnalysisAgent(BaseAgent):
 
         asset_config = {**self.asset_config_default, **self.asset_configs.get(pair, {})}
 
-        buy_threshold = 65 + asset_config["signal_threshold_adj"]
-        sell_threshold = 35 - asset_config["signal_threshold_adj"]
+        asset_config = apply_timeframe_overrides(asset_config, self.asset_configs.get(pair, {}), self.timeframe)
+
+        buy_threshold = 58 + asset_config["signal_threshold_adj"]
+        sell_threshold = 42 - asset_config["signal_threshold_adj"]
 
         entry_timing_approved = True
         entry_timing_reason = "Not configured"
@@ -206,6 +210,58 @@ class MarketAnalysisAgent(BaseAgent):
             "entry_timing_approved": entry_timing_approved,
             "entry_timing_reason": entry_timing_reason,
         }
+
+    @staticmethod
+    def calculate_rsi(closes: List[float], period: int = 14) -> Optional[float]:
+        """Wilder-smoothed RSI from a list of close prices.
+
+        Uses exponential moving average (Wilder's smoothing) where
+        avg_gain = (prev_avg_gain * (period - 1) + current_gain) / period
+
+        Returns None if insufficient data (< period + 1 bars).
+        """
+        if len(closes) < period + 1:
+            return None
+
+        gains: List[float] = []
+        losses: List[float] = []
+        for i in range(1, len(closes)):
+            delta = closes[i] - closes[i - 1]
+            gains.append(max(delta, 0.0))
+            losses.append(max(-delta, 0.0))
+
+        if len(gains) < period:
+            return None
+
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
+
+        for i in range(period, len(gains)):
+            avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+            avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+
+        if avg_loss == 0:
+            if avg_gain == 0:
+                return 50.0
+            return 100.0
+
+        rs = avg_gain / avg_loss
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        return max(0.0, min(100.0, rsi))
+
+    def _calculate_rsi(self, data: Dict[str, Any]) -> float:
+        """Calculate RSI using Wilder smoothing if OHLCV closes available.
+
+        Falls back to the simple linear approximation when candle data
+        is not present in the input dict.
+        """
+        closes = data.get("closes")
+        if isinstance(closes, list) and len(closes) > self.rsi_period:
+            result = self.calculate_rsi(closes, self.rsi_period)
+            if result is not None:
+                return result
+        price_change = data.get("price_change_24h_pct", 0)
+        return self._calculate_rsi_simple(price_change)
 
     def _calculate_rsi_simple(self, price_change: float) -> float:
         rsi = 50 + (price_change / 10)
@@ -249,7 +305,7 @@ class MarketAnalysisAgent(BaseAgent):
         if volatility == "high":
             return MarketRegime.HIGH_VOLATILITY.value
 
-        if price_change > 2 and rsi > 50:
+        if price_change > 3 and rsi > 55:
             return MarketRegime.BULLISH.value
 
         return MarketRegime.SIDEWAYS.value
@@ -258,6 +314,8 @@ class MarketAnalysisAgent(BaseAgent):
         self, price_change: float, rsi: float, pair: str = ""
     ) -> float:
         asset_config = {**self.asset_config_default, **self.asset_configs.get(pair, {})}
+        asset_config = apply_timeframe_overrides(asset_config, self.asset_configs.get(pair, {}), self.timeframe)
+
         rsi_weight = asset_config["rsi_weight"]
         momentum_weight = asset_config["momentum_weight"]
 

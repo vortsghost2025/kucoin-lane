@@ -17,6 +17,8 @@ from ta.trend import ADXIndicator
 from ta.volatility import AverageTrueRange
 from typing import Dict
 
+from ..utils.timeframe import ATR_THRESHOLD_BY_TIMEFRAME, get_atr_threshold
+
 logger = logging.getLogger(__name__)
 
 
@@ -29,6 +31,11 @@ class RegimeDetector:
     - TRENDING_DOWN: Strong downtrend, AVOID longs or use shorts
     - RANGING_HIGH_VOL: Choppy but volatile, reduce position size
     - RANGING_LOW_VOL: Stable range, ideal for mean reversion
+
+    ATR high-volatility threshold is timeframe-aware: wider timeframes
+    (e.g. 6h, 1d) produce intrinsically larger ATR values, so the
+    threshold scales up via ATR_THRESHOLD_BY_TIMEFRAME to prevent
+    false HIGH_VOL classifications.
     """
 
     def __init__(
@@ -36,12 +43,35 @@ class RegimeDetector:
         adx_period: int = 14,
         atr_period: int = 14,
         adx_trend_threshold: int = 25,
-        atr_high_threshold: float = 0.03,
+        atr_high_threshold: float = None,
+        timeframe: str = "1hour",
     ):
+        """
+        Initialize the RegimeDetector.
+
+        Args:
+            adx_period: Lookback window for ADX calculation.
+            atr_period: Lookback window for ATR calculation.
+            adx_trend_threshold: ADX value above which the market is
+                considered trending.
+            atr_high_threshold: ATR percentage threshold for high-vol
+                classification.  When ``None`` (default), the threshold
+                is automatically selected from ATR_THRESHOLD_BY_TIMEFRAME
+                based on *timeframe*.  Pass an explicit value to override
+                the timeframe-based scaling.
+            timeframe: Candle timeframe string (e.g. ``"1min"``,
+                ``"1hour"``, ``"1day"``).  Used to look up the
+                appropriate ATR high-threshold when *atr_high_threshold*
+                is ``None``.
+        """
         self.adx_period = adx_period
         self.atr_period = atr_period
         self.adx_threshold = adx_trend_threshold
-        self.atr_high = atr_high_threshold
+        self.timeframe = timeframe
+        if atr_high_threshold is not None:
+            self.atr_high = atr_high_threshold
+        else:
+            self.atr_high = get_atr_threshold(self.timeframe)
 
         self.current_regime = None
         self.regime_confidence = 0.0
@@ -50,6 +80,10 @@ class RegimeDetector:
     def analyze(self, df: pd.DataFrame) -> Dict:
         """
         Analyze market data and return regime classification.
+
+        The ATR high-volatility threshold is automatically scaled by the
+        configured timeframe (see ATR_THRESHOLD_BY_TIMEFRAME) unless an
+        explicit atr_high_threshold was provided at construction time.
 
         Args:
             df: OHLCV DataFrame with high, low, close columns
@@ -104,7 +138,7 @@ class RegimeDetector:
                 confidence = min(adx / 40, 1.0)
             elif is_trending and direction == "BEARISH":
                 regime = "TRENDING_DOWN"
-                recommendation = "HALT_TRADING"
+                recommendation = "SHORT_TREND"
                 confidence = min(adx / 40, 1.0)
             elif not is_trending and is_high_vol:
                 regime = "RANGING_HIGH_VOL"
@@ -164,6 +198,8 @@ class RegimeDetector:
         elif rec == "USE_RSI":
             return 1.0
         elif rec == "USE_TREND":
+            return 0.8
+        elif rec == "SHORT_TREND":
             return 0.8
         else:
             return 0.5

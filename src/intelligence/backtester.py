@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from ..base_agent import BaseAgent, AgentStatus
 from ..config import BACKTEST_CONFIG as GLOBAL_BACKTEST_CONFIG
+from ..utils.timeframe import apply_timeframe_overrides, resolve_timeframe
 from .historical_backtester import HistoricalBacktester
 
 
@@ -39,6 +40,7 @@ class BacktestingAgent(BaseAgent):
         )
         self.max_drawdown_allowed = cfg.get("max_drawdown", 0.15)
         self.historical_data: Dict[str, Any] = {}
+        self.timeframe = resolve_timeframe(cfg)
 
         global_default = GLOBAL_BACKTEST_CONFIG.get("asset_factor_default", {})
         config_default = cfg.get("asset_factor_default", {})
@@ -126,6 +128,9 @@ class BacktestingAgent(BaseAgent):
             **self.asset_factor_default,
             **self.asset_performance_factors.get(pair, {}),
         }
+
+        asset_factor = apply_timeframe_overrides(asset_factor, self.asset_performance_factors.get(pair, {}), self.timeframe)
+
         win_rate_multiplier = asset_factor["win_rate_multiplier"]
         drawdown_adjustment = asset_factor["max_drawdown_adjustment"]
 
@@ -133,7 +138,7 @@ class BacktestingAgent(BaseAgent):
         historical_result = self.historical_backtester.backtest_pair(
             pair, analysis, self._klines_fetcher, self._exchange_adapter
         )
-        if historical_result is not None:
+        if historical_result is not None and historical_result.get("signal_valid", True) and historical_result.get("win_rate", 0.5) > 0:
             win_rate = historical_result.get("win_rate", 0.5)
             max_drawdown = historical_result.get("max_drawdown", 0.08)
             signal_valid = historical_result.get("signal_valid", True)
@@ -219,6 +224,9 @@ class BacktestingAgent(BaseAgent):
             **self.asset_factor_default,
             **self.asset_performance_factors.get(pair, {}),
         }
+
+        asset_factor = apply_timeframe_overrides(asset_factor, self.asset_performance_factors.get(pair, {}), self.timeframe)
+
         adjusted_win_rate = win_rate * asset_factor["win_rate_multiplier"]
 
         return adjusted_win_rate
@@ -226,15 +234,23 @@ class BacktestingAgent(BaseAgent):
     def _calculate_sell_signal_win_rate(
         self, signal_strength: float, pair: str = ""
     ) -> float:
+        # Sell base_rate is 0.48 (vs 0.52 for buys) — empirical observation that
+        # sell signals underperform buys in this strategy. This creates a modest
+        # long bias: SELL signals need ~4% higher signal_strength to pass the
+        # same win_rate gate as BUY signals. Intentional: strategy edge is stronger
+        # on the long side, especially in trending-up regimes.
         base_rate = 0.48
-        strength_boost = signal_strength * 0.12
+        strength_boost = signal_strength * 0.15
         win_rate = base_rate + strength_boost
-        win_rate = min(win_rate, 0.65)
+        win_rate = min(win_rate, 0.75)
 
         asset_factor = {
             **self.asset_factor_default,
             **self.asset_performance_factors.get(pair, {}),
         }
+
+        asset_factor = apply_timeframe_overrides(asset_factor, self.asset_performance_factors.get(pair, {}), self.timeframe)
+
         adjusted_win_rate = win_rate * asset_factor["win_rate_multiplier"]
 
         return adjusted_win_rate
@@ -256,6 +272,9 @@ class BacktestingAgent(BaseAgent):
             **self.asset_factor_default,
             **self.asset_performance_factors.get(pair, {}),
         }
+
+        asset_factor = apply_timeframe_overrides(asset_factor, self.asset_performance_factors.get(pair, {}), self.timeframe)
+
         final_drawdown = adjusted_drawdown * asset_factor["max_drawdown_adjustment"]
 
         return final_drawdown

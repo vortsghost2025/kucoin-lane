@@ -22,11 +22,7 @@ class HistoricalBacktester:
         self._cache: Dict[str, Dict] = {}
 
     def backtest_pair(
-        self,
-        pair: str,
-        analysis: Dict[str, Any],
-        klines_fetcher=None,
-        exchange_adapter=None,
+        self, pair: str, analysis: Dict[str, Any], klines_fetcher=None, exchange_adapter=None,
     ) -> Optional[Dict[str, Any]]:
         """Run historical backtest for a pair.
 
@@ -35,13 +31,27 @@ class HistoricalBacktester:
         if klines_fetcher is None or exchange_adapter is None:
             return None
 
+        normalized_pair = pair.replace("-", "/")
+
         try:
             df = klines_fetcher.fetch_klines(
-                exchange_adapter,
-                pair,
-                interval="1hour",
-                candle_count=200,
+                exchange_adapter, normalized_pair, interval="1hour", candle_count=200,
             )
+
+            if df is None or df.empty or len(df) < 50:
+                logger.info(
+                    f"[HISTORICAL_BT] 1hour klines insufficient for {normalized_pair} "
+                    f"({len(df) if df is not None else 0} bars), trying 5min fallback"
+                )
+                df = klines_fetcher.fetch_klines(
+                    exchange_adapter, normalized_pair, interval="5min", candle_count=100,
+                )
+
+            if df is None or df.empty or len(df) < 50:
+                logger.warning(
+                    f"[HISTORICAL_BT] Insufficient klines for {normalized_pair} "
+                    f"({len(df) if df is not None else 0} bars)"
+                )
 
             if df is None or df.empty or len(df) < 50:
                 logger.warning(
@@ -83,7 +93,7 @@ class HistoricalBacktester:
                 else f"Win rate {metrics['win_rate']:.1%} or drawdown "
                      f"{metrics['max_drawdown']:.1%} outside acceptable range"
             )
-            metrics["confidence"] = metrics["win_rate"] if metrics["signal_valid"] else 0
+            metrics["confidence"] = metrics["win_rate"]
             metrics["recommendation"] = "PROCEED" if metrics["signal_valid"] else "SKIP"
 
             logger.info(
