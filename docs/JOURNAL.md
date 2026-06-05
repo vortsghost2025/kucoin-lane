@@ -751,3 +751,11 @@ _This journal is the single source of truth for kucoin-lane work. Updated at eve
 
 ### Final Baseline
 - 446 passed, 0 failed, 141 warnings — confirmed after all P3 changes
+
+
+## Integration Fix — 2026-06-05 03:54:24 UTC
+- **Commit**: 673c700
+- **Fix**: orchestrator.py lines 1027-1033 indent restored (+20 spaces each)
+- **Root cause**: cherry-pick merge took headless/main (broken) side; indent corruption dropped intelligence_boost block out of try@988 scope
+- **Test result**: 544 passed, 0 failed
+- **Status**: SyntaxError resolved; main branch now parseable and fully passing
