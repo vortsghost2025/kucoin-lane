@@ -759,3 +759,13 @@ _This journal is the single source of truth for kucoin-lane work. Updated at eve
 - **Root cause**: cherry-pick merge took headless/main (broken) side; indent corruption dropped intelligence_boost block out of try@988 scope
 - **Test result**: 544 passed, 0 failed
 - **Status**: SyntaxError resolved; main branch now parseable and fully passing
+
+## 2026-06-05 03:04 — Integration Verified
+
+- ast.parse OK on orchestrator.py
+- pytest: 544 passed, 0 failed (local + headless)
+- Cherry-pick merge commit 5e7e1d3 on main
+- Indent fix committed as 673c700, journal as c589ecb
+- Pushed to origin (GitHub) and headless (SSH/Tailscale)
+- Both remotes: up-to-date
+- Working copy: clean (paper_trades_ledger.json = runtime artifact)
