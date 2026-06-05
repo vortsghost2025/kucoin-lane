@@ -250,7 +250,7 @@ class TestBacktestPairEndToEnd:
         result = bt.backtest_pair("BTC-USDT", {}, fetcher, adapter)
 
         fetcher.fetch_klines.assert_called_once_with(
-            adapter, "BTC-USDT", interval="1hour", candle_count=200
+            adapter, "BTC/USDT", interval="1hour", candle_count=200
         )
         assert result is not None
         assert "pair" in result
@@ -291,7 +291,7 @@ class TestBacktestPairEndToEnd:
         bt.backtest_pair("ETH-USDT", {}, fetcher, adapter)
 
         fetcher.fetch_klines.assert_called_once_with(
-            adapter, "ETH-USDT", interval="1hour", candle_count=200
+            adapter, "ETH/USDT", interval="1hour", candle_count=200
         )
 
     def test_exception_returns_none(self):
