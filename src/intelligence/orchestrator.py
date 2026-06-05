@@ -40,6 +40,7 @@ from .regime_detector import RegimeDetector
 from .lead_lag import LeadLagMonitor
 from .whale_watch import WhaleWatch
 from ..data.kucoin_klines_fetcher import KuCoinKlinesFetcher
+from ..data.dex_intelligence_agent import DexIntelligenceAgent
 from .strategies import StrategyFactory
 
 logger = logging.getLogger(__name__)
@@ -84,6 +85,15 @@ SPREAD_REDUCTION_THRESHOLD = 0.01
 SPREAD_HIGH_THRESHOLD = 0.02
 INTEL_BOOST_CONFIDENCE_THRESHOLD = 0.6
 INTEL_BOOST_WEIGHT = 0.3
+
+DEX_TRENDING_CONFIDENCE = 0.7
+DEX_TRENDING_MULTIPLIER = 1.2
+DEX_VOLUME_SPIKE_CONFIDENCE = 0.8
+DEX_VOLUME_SPIKE_MULTIPLIER = 1.15
+PUMP_GRADUATION_CONFIDENCE = 0.85
+PUMP_GRADUATION_MULTIPLIER = 1.25
+DEX_LOW_CONFIDENCE_PENALTY = 0.7
+DEX_ULTRA_LOW_CONFIDENCE_PENALTY = 0.4
 
 
 class WorkflowStage(Enum):
@@ -168,6 +178,13 @@ class IntelligenceOrchestrator(BaseAgent):
         self.circuit_breaker_active = False
         self._load_cb_state()
         self.agent_registry: Dict[str, BaseAgent] = {}
+        
+        # DEX Intelligence Agent (pre-fetch intelligence phase)
+        enable_dex = config.get("enable_dex_intelligence", True)
+        self.dex_intelligence = DexIntelligenceAgent(config) if enable_dex else None
+        if self.dex_intelligence:
+            self.register_agent(self.dex_intelligence)
+        
         self.is_paper_trading = config.get("paper_trading", True)
         self._last_daily_reset: Optional[str] = None
         self._cycle_count = 0
@@ -930,6 +947,20 @@ class IntelligenceOrchestrator(BaseAgent):
 
             self.logger.info(f"Starting workflow for symbols: {market_symbols}")
 
+            # ── DEX Intelligence Pre-fetch Phase ──
+            if self.dex_intelligence:
+                self.logger.info("[DEX] Running pre-fetch DEX intelligence scan...")
+                dex_result = self._execute_agent_phase(
+                    "DexIntelligenceAgent",
+                    "execute",
+                    {"chain": "solana", "market_symbols": market_symbols},
+                )
+                cycle_results["dex_intelligence_result"] = dex_result
+                if dex_result.get("success"):
+                    self.logger.info(f"[DEX] Scan complete: {dex_result.get('data', {}).get('scan_summary')}")
+                else:
+                    self.logger.warning(f"[DEX] Scan failed: {dex_result.get('error')}")
+
             self.transition_stage(WorkflowStage.FETCHING_DATA)
             data_result = self._execute_agent_phase(
                 "DataFetchingAgent", "fetch_data", {"symbols": market_symbols}
@@ -1054,6 +1085,57 @@ class IntelligenceOrchestrator(BaseAgent):
                                     f"[INTELLIGENCE] {pair} signal_strength killed: "
                                     f"EXIT_ALL from intelligence"
                                 )
+
+                            # ── DEX Intelligence Signal Boost ──
+                            if self.dex_intelligence:
+                                dex_signals = self.dex_intelligence.get_latest_signals().get("dex_signals", [])
+                                if dex_signals:
+                                    base_token = pair.split("/")[0] if "/" in pair else pair.split("-")[0]
+                                    for dex_sig in dex_signals:
+                                        dex_pair = dex_sig.get("pair", "")
+                                        if dex_pair.startswith(base_token + "/") or dex_pair.startswith(base_token + "-"):
+                                            signal = dex_sig.get("signal", "NEUTRAL")
+                                            confidence_tier = dex_sig.get("confidence_tier", "low")
+                                            composite = dex_sig.get("composite_score", 0.0)
+                                            
+                                            if signal == "STRONG_BUY":
+                                                boost_pct = DEX_TRENDING_MULTIPLIER - 1.0
+                                                pair_analysis_from_market["signal_strength"] = min(
+                                                    1.0, 
+                                                    pair_analysis_from_market.get("signal_strength", 0.0) * DEX_TRENDING_MULTIPLIER
+                                                )
+                                                self.logger.info(
+                                                    f"[DEX BOOST] {pair} signal_strength boosted {boost_pct:.0%} "
+                                                    f"(DEX STRONG_BUY: {dex_pair}, composite={composite:.2f})"
+                                                )
+                                            elif signal == "BUY":
+                                                boost_pct = DEX_VOLUME_SPIKE_MULTIPLIER - 1.0
+                                                pair_analysis_from_market["signal_strength"] = min(
+                                                    1.0,
+                                                    pair_analysis_from_market.get("signal_strength", 0.0) * DEX_VOLUME_SPIKE_MULTIPLIER
+                                                )
+                                                self.logger.info(
+                                                    f"[DEX BOOST] {pair} signal_strength boosted {boost_pct:.0%} "
+                                                    f"(DEX BUY: {dex_pair}, composite={composite:.2f})"
+                                                )
+                                            
+                                            # Apply confidence tier penalties
+                                            if confidence_tier == "low":
+                                                pair_analysis_from_market["signal_strength"] *= DEX_LOW_CONFIDENCE_PENALTY
+                                                self.logger.debug(f"[DEX PENALTY] {pair} low confidence tier penalty applied")
+                                            elif confidence_tier == "ultra_low":
+                                                pair_analysis_from_market["signal_strength"] *= DEX_ULTRA_LOW_CONFIDENCE_PENALTY
+                                                self.logger.debug(f"[DEX PENALTY] {pair} ultra_low confidence tier penalty applied")
+                                            
+                                            # Add DEX metadata to intelligence record
+                                            if "dex_signals" not in pair_analysis_from_market.get("intelligence", {}):
+                                                pair_analysis_from_market.setdefault("intelligence", {})["dex_signals"] = []
+                                            pair_analysis_from_market["intelligence"]["dex_signals"].append({
+                                                "pair": dex_pair,
+                                                "signal": signal,
+                                                "composite_score": composite,
+                                                "confidence_tier": confidence_tier,
+                                            })
                             pair_analysis_from_market["intelligence"] = {
                                 "action": intel_action,
                                 "confidence": intel_confidence,
