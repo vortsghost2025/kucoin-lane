@@ -37,6 +37,7 @@ class TestIntelligenceOrchestrator:
                     "enable_lead_lag": False,
                     "enable_whale": False,
                     "enable_dex_lag": False,
+                    "enable_creator_tracking": False,
                     "paper_trading": True,
                 }
             )
@@ -48,6 +49,7 @@ class TestIntelligenceOrchestrator:
             "lead_lag": False,
             "whale": False,
             "dex_cex_lag": False,
+            "creator_tracking": False,
         }
         assert orchestrator.current_stage == WorkflowStage.IDLE
         assert orchestrator.trading_paused is False

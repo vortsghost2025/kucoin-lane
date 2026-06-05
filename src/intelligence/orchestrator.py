@@ -38,6 +38,7 @@ from ..risk.portfolio_circuit_breaker import (
 )
 from .regime_detector import RegimeDetector
 from .lead_lag import LeadLagMonitor, DexToCexLagDetector
+from .creator_tracker import CreatorTrackerAgent
 from .whale_watch import WhaleWatch
 from ..data.kucoin_klines_fetcher import KuCoinKlinesFetcher
 from ..data.dex_intelligence_agent import DexIntelligenceAgent
@@ -102,6 +103,11 @@ DEX_CEX_WATCH_CONFIDENCE = 0.6
 DEX_CEX_STALE_PENALTY = 0.6
 DEX_CEX_STALE_CONFIDENCE = 0.9
 
+CREATOR_ALPHA_MULTIPLIER = 1.4
+CREATOR_REPEAT_MULTIPLIER = 1.15
+CREATOR_NEW_PENALTY = 0.95
+CREATOR_ALPHA_THRESHOLD = 0.8
+
 
 class WorkflowStage(Enum):
     IDLE = "idle"
@@ -139,6 +145,7 @@ class IntelligenceOrchestrator(BaseAgent):
         enable_lead_lag = config.get("enable_lead_lag", True)
         enable_whale = config.get("enable_whale", True)
         enable_dex_lag = config.get("enable_dex_lag", True)
+        enable_creator_tracking = config.get("enable_creator_tracking", True)
 
         self.timeframe = config.get("timeframe") or os.getenv("CANDLE_INTERVAL", "1hour")
         if "timeframe" not in config:
@@ -151,6 +158,7 @@ class IntelligenceOrchestrator(BaseAgent):
             lag_window_days=config.get("dex_lag_window_days", 30),
             min_composite_score=config.get("dex_lag_min_composite", 0.4),
         ) if enable_dex_lag else None
+        self.creator_tracker = CreatorTrackerAgent(config) if enable_creator_tracking else None
         
         # Strategy signal generator (VolBreakout, Supertrend, or legacy RSI/regime)
         strategy_name = config.get("strategy") or os.getenv("STRATEGY", "rsi_regime").lower()
@@ -173,6 +181,7 @@ class IntelligenceOrchestrator(BaseAgent):
             "lead_lag": enable_lead_lag,
             "whale": enable_whale,
             "dex_cex_lag": enable_dex_lag,
+            "creator_tracking": enable_creator_tracking,
         }
 
         self.regime_guard_mode = os.getenv("REGIME_GUARD_MODE", REGIME_GUARD_MODE)
@@ -197,6 +206,10 @@ class IntelligenceOrchestrator(BaseAgent):
         self.dex_intelligence = DexIntelligenceAgent(config) if enable_dex else None
         if self.dex_intelligence:
             self.register_agent(self.dex_intelligence)
+        
+        # Creator Tracker Agent (tracks repeat token creators)
+        if self.creator_tracker:
+            self.register_agent(self.creator_tracker)
         
         self.is_paper_trading = config.get("paper_trading", True)
         self._last_daily_reset: Optional[str] = None
@@ -968,11 +981,31 @@ class IntelligenceOrchestrator(BaseAgent):
                     "execute",
                     {"chain": "solana", "market_symbols": market_symbols},
                 )
-            cycle_results["dex_intelligence_result"] = dex_result
-            if dex_result.get("success"):
-                self.logger.info(f"[DEX] Scan complete: {dex_result.get('data', {}).get('scan_summary')}")
-            else:
-                self.logger.warning(f"[DEX] Scan failed: {dex_result.get('error')}")
+                cycle_results["dex_intelligence_result"] = dex_result
+                if dex_result.get("success"):
+                    self.logger.info(f"[DEX] Scan complete: {dex_result.get('data', {}).get('scan_summary')}")
+                else:
+                    self.logger.warning(f"[DEX] Scan failed: {dex_result.get('error')}")
+
+            # ── Creator Tracking Phase ──
+            if self.creator_tracker:
+                self.logger.info("[CREATOR] Running creator tracking scan...")
+                try:
+                    dex_signals = dex_result.get("data", {}).get("dex_signals", []) if dex_result.get("success") else []
+                    creator_result = self.creator_tracker.execute({"dex_signals": dex_signals})
+                    cycle_results["creator_tracker_result"] = creator_result
+                    if creator_result.get("success"):
+                        new_creators = creator_result.get("data", {}).get("new_creators", [])
+                        creator_count = creator_result.get("data", {}).get("creator_count", 0)
+                        self.logger.info(
+                            f"[CREATOR] Tracking {creator_count} creators, "
+                            f"{len(new_creators)} new detected this cycle"
+                        )
+                    else:
+                        self.logger.warning(f"[CREATOR] Tracking failed: {creator_result.get('error')}")
+                except Exception as e:
+                    self.logger.warning(f"[CREATOR] Tracking error: {e}")
+                    cycle_results["creator_tracker_result"] = {"success": False, "error": str(e)}
 
             # ── DEX→CEX Lag Detection Phase ──
             if self.dex_cex_lag:
@@ -1224,6 +1257,62 @@ class IntelligenceOrchestrator(BaseAgent):
                                             "dex_pair": lag_pair,
                                         })
                                         break
+
+                            # ── Creator Signal Boost ──
+                            if self.creator_tracker:
+                                creator_result = cycle_results.get("creator_tracker_result", {})
+                                if creator_result.get("success"):
+                                    new_creators = creator_result.get("data", {}).get("new_creators", [])
+                                    if new_creators:
+                                        base_token = pair.split("/")[0] if "/" in pair else pair.split("-")[0]
+                                        for new_cr in new_creators:
+                                            if new_cr.get("token", "").upper() != base_token.upper():
+                                                continue
+                                            creator_id = new_cr.get("creator", "unknown")
+                                            profile = self.creator_tracker.creator_profiles.get(creator_id)
+                                            if not profile:
+                                                continue
+                                            rep_score = profile.reputation_score
+                                            tag_list = profile.tags
+                                            
+                                            if "alpha" in tag_list:
+                                                pair_analysis_from_market["signal_strength"] = min(
+                                                    1.0,
+                                                    pair_analysis_from_market.get("signal_strength", 0.0) * CREATOR_ALPHA_MULTIPLIER,
+                                                )
+                                                self.logger.info(
+                                                    f"[CREATOR BOOST] {pair} signal_strength boosted "
+                                                    f"{CREATOR_ALPHA_MULTIPLIER - 1:.0%} "
+                                                    f"(ALPHA creator: {creator_id[:8]}..., rep={rep_score:.2f})"
+                                                )
+                                            elif len(profile.token_history) > 1:
+                                                pair_analysis_from_market["signal_strength"] = min(
+                                                    1.0,
+                                                    pair_analysis_from_market.get("signal_strength", 0.0) * CREATOR_REPEAT_MULTIPLIER,
+                                                )
+                                                self.logger.info(
+                                                    f"[CREATOR BOOST] {pair} signal_strength boosted "
+                                                    f"{CREATOR_REPEAT_MULTIPLIER - 1:.0%} "
+                                                    f"(REPEAT creator: {creator_id[:8]}..., rep={rep_score:.2f}, "
+                                                    f"tokens={len(profile.token_history)})"
+                                                )
+                                            else:
+                                                pair_analysis_from_market["signal_strength"] *= CREATOR_NEW_PENALTY
+                                                self.logger.info(
+                                                    f"[CREATOR PENALTY] {pair} signal_strength penalized "
+                                                    f"{1 - CREATOR_NEW_PENALTY:.0%} "
+                                                    f"(NEW creator: {creator_id[:8]}..., rep={rep_score:.2f})"
+                                                )
+                                            
+                                            pair_analysis_from_market.setdefault("intelligence", {}).setdefault(
+                                                "creator_signals", []
+                                            ).append({
+                                                "creator_id": creator_id,
+                                                "reputation_score": rep_score,
+                                                "token_count": len(profile.token_history),
+                                                "is_alpha": "alpha" in tag_list,
+                                            })
+                                            break
 
                             pair_analysis_from_market["intelligence"] = {
                                 "action": intel_action,
