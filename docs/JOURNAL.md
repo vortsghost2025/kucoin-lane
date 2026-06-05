@@ -869,3 +869,69 @@ finds actionable signals but historical validation requires paid data.
 
 **Next**: Commit tests + backtest results. Expand kucoin_listings.json with 2025-2026
 CEX listings. Add DEX provider methods to multi_provider_client.py.
+
+### 2026-06-05 11:00:04 UTC - feat(data): add DEX intelligence provider to multi_provider_client
+
+**Context**: Extend the multi-source price oracle to surface DEX market data
+for pre-CEX-listing tokens. The existing fetch_simple_price waterfall (Binance
+-> Kraken -> CoinGecko) misses tokens that exist on Solana/Base/BSC DEXes but
+not yet on major CEXs. The DEX Intelligence Module (`a0d77d2`) already produces
+trending/new-pool signals, but those signals need a quantitative price/volume
+context to rank against CEX-listed tokens.
+
+**Implementation** (`src/data/multi_provider_client.py`):
+
+- Added `DEXSCREENER_BASE_URL` and `GECKOTERMINAL_BASE_URL` constants.
+- Added `DEXSCRENER_CHAIN_MAP` (solana/ethereum/base/arbitrum/bsc) for chain routing.
+- Added `DEX_SIGNAL_THRESHOLDS` (min_liquidity_usd=50k, min_volume_24h=10k, min_composite_score=0.4).
+- Added `_to_dex_shape()` — normalizes DEX responses to the CoinGecko price dict
+  shape so downstream orchestrator code does not need to special-case sources.
+- Added `_fetch_dexscreener(coingecko_id, chain)` — searches by base symbol,
+  filters by chain + liquidity + volume thresholds, picks highest-liquidity pair
+  per token (avoids racing on multi-DEX pairs of the same token).
+- Added `fetch_dex_signals(ids, chain, min_composite_score)` — batch wrapper
+  with rate-limit-aware threading; computes signal_strength as vol/liq ratio
+  scaled to [0,1] (vol/liq=5.0 -> 1.0), marks meets_signal_threshold bool.
+- Added `fetch_simple_price_with_dex(...)` — opt-in waterfall that supplements
+  CEX data with DEX context (liquidity, signal_strength, chain, dex_id) or
+  injects DEX-only entries for tokens not yet on CEXs.
+
+**Tests** (`tests/test_data_multi_provider_client_dex.py`, 21 new tests, 608 total):
+
+- TestDexScreenerFetch (11): constants, chain map coverage, unknown id, success
+  path, highest-liquidity pair selection, chain filtering, low-liquidity filter,
+  low-volume filter, empty pairs, network error, _to_dex_shape.
+- TestFetchDexSignals (7): empty ids, None/empty filter, signal_strength math,
+  below-threshold, zero-liquidity, None fetch filtered, exception handling.
+- TestFetchSimplePriceWithDex (3): prefer_dex=False uses CEX, prefer_dex=True
+  supplements CEX with dex_supplement dict, prefer_dex=True adds DEX-only entries
+  not in CEX results.
+
+All 608 tests pass (587 prior + 21 new).
+
+**Design choices**:
+
+- DexScreener is the primary free source; GeckoTerminal added as a constant but
+  the fallback path is left for a future change. The DEX Intelligence scanner
+  module already uses GeckoTerminal for trending/new-pool discovery, so the
+  fallback is non-blocking.
+- Thresholds (50k liq, 10k vol) are conservative to avoid surfacing micro-cap
+  noise; tuned to match the 30-day backtest's surfaced tokens (FRACIV, JOBLESS,
+  NINJA, POKEHUB, SpaceX, ZEST) which all clear the bars.
+- signal_strength is intentionally simple (vol/liq ratio scaled). The DEX
+  Intelligence Module's signals.py already has a richer composite scorer with
+  tier penalties, so this oracle-level signal is for fast triage only.
+
+**Not in this commit (deferred)**:
+
+- `_fetch_geckoterminal()` function body (constant + URL added). Trending/new-pool
+  data is already in the DEX Intelligence scanner; adding a price-oracle fallback
+  duplicates coverage without adding signal.
+- `lead_lag.py` extension for DEX->CEX listing lag detection. Requires a join
+  between the 30-day backtest output (`reports/dex_backtest_*.json`) and the
+  KuCoin listings dataset, which is a separate work unit.
+
+**Files changed**:
+
+- `src/data/multi_provider_client.py` (+182 / -1)
+- `tests/test_data_multi_provider_client_dex.py` (new, +254)
