@@ -1024,13 +1024,13 @@ class IntelligenceOrchestrator(BaseAgent):
                             intel_multiplier = intel_analysis.get("position_multiplier", 1.0)
                             intel_action = intel_analysis.get("action", "HOLD")
                             base_strength = pair_analysis_from_market.get("signal_strength", 0.0)
-        if intel_action in ("BUY",) and intel_confidence > INTEL_BOOST_CONFIDENCE_THRESHOLD:
-            boost = intel_confidence * intel_multiplier
-            boosted_strength = min(1.0, base_strength + boost * INTEL_BOOST_WEIGHT)
-            pair_analysis_from_market["signal_strength"] = boosted_strength
-            pair_analysis_from_market["intelligence_boost"] = {
-                "base_strength": base_strength,
-                "boost": boost * INTEL_BOOST_WEIGHT,
+                            if intel_action in ("BUY",) and intel_confidence > INTEL_BOOST_CONFIDENCE_THRESHOLD:
+                                boost = intel_confidence * intel_multiplier
+                                boosted_strength = min(1.0, base_strength + boost * INTEL_BOOST_WEIGHT)
+                                pair_analysis_from_market["signal_strength"] = boosted_strength
+                                pair_analysis_from_market["intelligence_boost"] = {
+                                    "base_strength": base_strength,
+                                    "boost": boost * INTEL_BOOST_WEIGHT,
                                     "intel_action": intel_action,
                                     "intel_confidence": intel_confidence,
                                     "intel_multiplier": intel_multiplier,
