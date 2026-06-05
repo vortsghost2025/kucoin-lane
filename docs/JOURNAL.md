@@ -931,7 +931,84 @@ All 608 tests pass (587 prior + 21 new).
   between the 30-day backtest output (`reports/dex_backtest_*.json`) and the
   KuCoin listings dataset, which is a separate work unit.
 
-**Files changed**:
+**Files changed**: 
 
 - `src/data/multi_provider_client.py` (+182 / -1)
 - `tests/test_data_multi_provider_client_dex.py` (new, +254)
+
+---
+
+### 2026-06-05 12:00 UTC — Review-fix commit for DexToCexLagDetector (750a374)
+
+**Summary**: Three review findings on the `DexToCexLagDetector` class in
+`src/intelligence/lead_lag.py` were fixed and committed as `750a374`.
+
+**Findings addressed**:
+
+1. **P2 — timezone-aware comparison** (`detect()` L341, L361):
+   `datetime.now()` replaced with `datetime.now(timezone.utc)` so the
+   subtraction `now - scan_dt` is always aware-vs-aware. Listing dates
+   parsed without tzinfo get `.replace(tzinfo=...)` aligned to the
+   scan_dt timezone before the lag delta is computed.
+
+2. **P3 — RuntimeError guard in `detect()`** (L332-336):
+   Removed the auto-load fallback that silently called
+   `load_kucoin_listings()` / `load_dex_backtest()` with default paths.
+   `detect()` now raises `RuntimeError` if either dataset is missing,
+   making the contract explicit. `run()` remains as the convenience
+   wrapper that loads before detecting.
+
+3. **P3 — test scan_time for unlisted tokens** (test file):
+   Updated WATCH-signal test fixtures to use `scan_time` within 30 days
+   of "now" (set to `2026-06-04T10:00:00Z`) so they are not misclassified
+   as STALE by the new recency check added at L375-377.
+
+**Test suite**: 628 passed (608 existing + 20 DEX→CEX lag tests).
+
+**Files changed**:
+
+- `src/intelligence/lead_lag.py` (P2+P3 fixes in `DexToCexLagDetector`)
+- `tests/test_intelligence_lead_lag_dex_cex.py` (P3 test scan_time fix)
+
+---
+
+### 2026-06-05 14:15 UTC — Orchestrator DEX→CEX Lag Integration Complete
+
+**Action**: Integrated `DexToCexLagDetector` into `IntelligenceOrchestrator` with full signal boost pipeline.
+
+**Changes**:
+- Added DEX Intelligence signal boost in `make_decision()`:
+  - `STRONG_BUY` → `DEX_TRENDING_MULTIPLIER` (1.15x)
+  - `BUY` → `DEX_VOLUME_SPIKE_MULTIPLIER` (1.10x)
+  - Confidence tier penalties: `low` (0.8x), `ultra_low` (0.5x)
+  - DEX metadata appended to `pair_analysis["intelligence"]["dex_signals"]`
+- Added DEX→CEX Lag signal boost after DEX Intelligence:
+  - `OPPORTUNITY` → `DEX_CEX_OPPORTUNITY_MULTIPLIER` (1.25x)
+  - `WATCH` → `DEX_CEX_WATCH_MULTIPLIER` (1.10x)
+  - `STALE` → `DEX_CEX_STALE_PENALTY` (0.9x)
+  - Lag metadata appended to `pair_analysis["intelligence"]["dex_cex_lag_signals"]`
+- Wired `DexToCexLagDetector` in `__init__` with `enable_dex_lag` config (default `True`)
+- Added lag detection run phase in `run_cycle()` after `dex_intelligence.execute()`, before `WorkflowStage.FETCHING_DATA`
+- Wrapped in try/except with graceful degradation
+
+**Config additions**:
+- `enable_dex_lag` (default `True`)
+- `dex_lag_window_days` (default 30, passed to detector)
+- `dex_lag_min_composite` (default 0.4, passed to detector)
+
+**Constants defined** (module-level):
+- `DEX_TRENDING_MULTIPLIER = 1.15`
+- `DEX_VOLUME_SPIKE_MULTIPLIER = 1.10`
+- `DEX_LOW_CONFIDENCE_PENALTY = 0.8`
+- `DEX_ULTRA_LOW_CONFIDENCE_PENALTY = 0.5`
+- `DEX_CEX_OPPORTUNITY_MULTIPLIER = 1.25`
+- `DEX_CEX_WATCH_MULTIPLIER = 1.10`
+- `DEX_CEX_STALE_PENALTY = 0.9`
+
+**Files changed**:
+- `src/intelligence/orchestrator.py` (DEX Intelligence + DEX→CEX Lag integration)
+- `tests/test_intelligence_orchestrator.py` (fixture updated with `enable_dex_lag: False`)
+
+**Tests**: All 628 tests pass (30.43s)
+**Commit**: `7a6ff43`
+**Push**: origin/main ✅
