@@ -37,7 +37,7 @@ from ..risk.portfolio_circuit_breaker import (
     CircuitBreakTriggered,
 )
 from .regime_detector import RegimeDetector
-from .lead_lag import LeadLagMonitor
+from .lead_lag import LeadLagMonitor, DexToCexLagDetector
 from .whale_watch import WhaleWatch
 from ..data.kucoin_klines_fetcher import KuCoinKlinesFetcher
 from ..data.dex_intelligence_agent import DexIntelligenceAgent
@@ -95,6 +95,13 @@ PUMP_GRADUATION_MULTIPLIER = 1.25
 DEX_LOW_CONFIDENCE_PENALTY = 0.7
 DEX_ULTRA_LOW_CONFIDENCE_PENALTY = 0.4
 
+DEX_CEX_OPPORTUNITY_MULTIPLIER = 1.3
+DEX_CEX_OPPORTUNITY_CONFIDENCE = 0.8
+DEX_CEX_WATCH_MULTIPLIER = 1.1
+DEX_CEX_WATCH_CONFIDENCE = 0.6
+DEX_CEX_STALE_PENALTY = 0.6
+DEX_CEX_STALE_CONFIDENCE = 0.9
+
 
 class WorkflowStage(Enum):
     IDLE = "idle"
@@ -131,6 +138,7 @@ class IntelligenceOrchestrator(BaseAgent):
         enable_regime = config.get("enable_regime", True)
         enable_lead_lag = config.get("enable_lead_lag", True)
         enable_whale = config.get("enable_whale", True)
+        enable_dex_lag = config.get("enable_dex_lag", True)
 
         self.timeframe = config.get("timeframe") or os.getenv("CANDLE_INTERVAL", "1hour")
         if "timeframe" not in config:
@@ -139,6 +147,10 @@ class IntelligenceOrchestrator(BaseAgent):
         self.regime_detector = RegimeDetector(timeframe=self.timeframe) if enable_regime else None
         self.lead_lag = LeadLagMonitor() if enable_lead_lag else None
         self.whale_watch = WhaleWatch() if enable_whale else None
+        self.dex_cex_lag = DexToCexLagDetector(
+            lag_window_days=config.get("dex_lag_window_days", 30),
+            min_composite_score=config.get("dex_lag_min_composite", 0.4),
+        ) if enable_dex_lag else None
         
         # Strategy signal generator (VolBreakout, Supertrend, or legacy RSI/regime)
         strategy_name = config.get("strategy") or os.getenv("STRATEGY", "rsi_regime").lower()
@@ -160,6 +172,7 @@ class IntelligenceOrchestrator(BaseAgent):
             "regime": enable_regime,
             "lead_lag": enable_lead_lag,
             "whale": enable_whale,
+            "dex_cex_lag": enable_dex_lag,
         }
 
         self.regime_guard_mode = os.getenv("REGIME_GUARD_MODE", REGIME_GUARD_MODE)
@@ -955,11 +968,28 @@ class IntelligenceOrchestrator(BaseAgent):
                     "execute",
                     {"chain": "solana", "market_symbols": market_symbols},
                 )
-                cycle_results["dex_intelligence_result"] = dex_result
-                if dex_result.get("success"):
-                    self.logger.info(f"[DEX] Scan complete: {dex_result.get('data', {}).get('scan_summary')}")
-                else:
-                    self.logger.warning(f"[DEX] Scan failed: {dex_result.get('error')}")
+            cycle_results["dex_intelligence_result"] = dex_result
+            if dex_result.get("success"):
+                self.logger.info(f"[DEX] Scan complete: {dex_result.get('data', {}).get('scan_summary')}")
+            else:
+                self.logger.warning(f"[DEX] Scan failed: {dex_result.get('error')}")
+
+            # ── DEX→CEX Lag Detection Phase ──
+            if self.dex_cex_lag:
+                self.logger.info("[DEX→CEX LAG] Running DEX-to-CEX lag detection...")
+                try:
+                    dex_cex_lag_result = self.dex_cex_lag.run()
+                    cycle_results["dex_cex_lag_result"] = dex_cex_lag_result
+                    opp_count = sum(1 for s in dex_cex_lag_result if s.get("lead_lag_signal") == "OPPORTUNITY")
+                    watch_count = sum(1 for s in dex_cex_lag_result if s.get("lead_lag_signal") == "WATCH")
+                    stale_count = sum(1 for s in dex_cex_lag_result if s.get("lead_lag_signal") == "STALE")
+                    self.logger.info(
+                        f"[DEX→CEX LAG] Detection complete: {opp_count} OPPORTUNITY, "
+                        f"{watch_count} WATCH, {stale_count} STALE signals"
+                    )
+                except Exception as e:
+                    self.logger.warning(f"[DEX→CEX LAG] Detection failed: {e}")
+                    cycle_results["dex_cex_lag_result"] = []
 
             self.transition_stage(WorkflowStage.FETCHING_DATA)
             data_result = self._execute_agent_phase(
@@ -1097,11 +1127,11 @@ class IntelligenceOrchestrator(BaseAgent):
                                             signal = dex_sig.get("signal", "NEUTRAL")
                                             confidence_tier = dex_sig.get("confidence_tier", "low")
                                             composite = dex_sig.get("composite_score", 0.0)
-                                            
+
                                             if signal == "STRONG_BUY":
                                                 boost_pct = DEX_TRENDING_MULTIPLIER - 1.0
                                                 pair_analysis_from_market["signal_strength"] = min(
-                                                    1.0, 
+                                                    1.0,
                                                     pair_analysis_from_market.get("signal_strength", 0.0) * DEX_TRENDING_MULTIPLIER
                                                 )
                                                 self.logger.info(
@@ -1118,7 +1148,7 @@ class IntelligenceOrchestrator(BaseAgent):
                                                     f"[DEX BOOST] {pair} signal_strength boosted {boost_pct:.0%} "
                                                     f"(DEX BUY: {dex_pair}, composite={composite:.2f})"
                                                 )
-                                            
+
                                             # Apply confidence tier penalties
                                             if confidence_tier == "low":
                                                 pair_analysis_from_market["signal_strength"] *= DEX_LOW_CONFIDENCE_PENALTY
@@ -1126,7 +1156,7 @@ class IntelligenceOrchestrator(BaseAgent):
                                             elif confidence_tier == "ultra_low":
                                                 pair_analysis_from_market["signal_strength"] *= DEX_ULTRA_LOW_CONFIDENCE_PENALTY
                                                 self.logger.debug(f"[DEX PENALTY] {pair} ultra_low confidence tier penalty applied")
-                                            
+
                                             # Add DEX metadata to intelligence record
                                             if "dex_signals" not in pair_analysis_from_market.get("intelligence", {}):
                                                 pair_analysis_from_market.setdefault("intelligence", {})["dex_signals"] = []
@@ -1136,6 +1166,65 @@ class IntelligenceOrchestrator(BaseAgent):
                                                 "composite_score": composite,
                                                 "confidence_tier": confidence_tier,
                                             })
+
+                            # ── DEX→CEX Lag Signal Boost ──
+                            if self.dex_cex_lag:
+                                dex_cex_lag_signals = cycle_results.get("dex_cex_lag_result", [])
+                                if dex_cex_lag_signals:
+                                    base_token = pair.split("/")[0] if "/" in pair else pair.split("-")[0]
+                                    for lag_sig in dex_cex_lag_signals:
+                                        if lag_sig.get("base_token", "").upper() != base_token.upper():
+                                            continue
+                                        lag_signal = lag_sig.get("lead_lag_signal", "")
+                                        lag_confidence = lag_sig.get("confidence", 0.0)
+                                        lag_pair = lag_sig.get("dex_pair", "")
+                                        lag_days = lag_sig.get("lag_days", 0)
+                                        composite = lag_sig.get("composite_score", 0.0)
+
+                                        if lag_signal == "OPPORTUNITY":
+                                            pair_analysis_from_market["signal_strength"] = min(
+                                                1.0,
+                                                pair_analysis_from_market.get("signal_strength", 0.0)
+                                                * DEX_CEX_OPPORTUNITY_MULTIPLIER,
+                                            )
+                                            self.logger.info(
+                                                f"[DEX→CEX LAG BOOST] {pair} signal_strength boosted "
+                                                f"{DEX_CEX_OPPORTUNITY_MULTIPLIER - 1:.0%} "
+                                                f"(OPPORTUNITY: {lag_pair}, lag={lag_days}d, "
+                                                f"composite={composite:.2f}, conf={lag_confidence:.2f})"
+                                            )
+                                        elif lag_signal == "WATCH":
+                                            pair_analysis_from_market["signal_strength"] = min(
+                                                1.0,
+                                                pair_analysis_from_market.get("signal_strength", 0.0)
+                                                * DEX_CEX_WATCH_MULTIPLIER,
+                                            )
+                                            self.logger.info(
+                                                f"[DEX→CEX LAG BOOST] {pair} signal_strength boosted "
+                                                f"{DEX_CEX_WATCH_MULTIPLIER - 1:.0%} "
+                                                f"(WATCH: {lag_pair}, lag={lag_days}d, "
+                                                f"composite={composite:.2f}, conf={lag_confidence:.2f})"
+                                            )
+                                        elif lag_signal == "STALE":
+                                            pair_analysis_from_market["signal_strength"] *= DEX_CEX_STALE_PENALTY
+                                            self.logger.info(
+                                                f"[DEX→CEX LAG PENALTY] {pair} signal_strength penalized "
+                                                f"{1 - DEX_CEX_STALE_PENALTY:.0%} "
+                                                f"(STALE: {lag_pair}, composite={composite:.2f}, conf={lag_confidence:.2f})"
+                                            )
+
+                                        pair_analysis_from_market.setdefault("intelligence", {}).setdefault(
+                                            "dex_cex_lag_signals", []
+                                        ).append({
+                                            "base_token": lag_sig.get("base_token"),
+                                            "lead_lag_signal": lag_signal,
+                                            "confidence": lag_confidence,
+                                            "composite_score": composite,
+                                            "lag_days": lag_days,
+                                            "dex_pair": lag_pair,
+                                        })
+                                        break
+
                             pair_analysis_from_market["intelligence"] = {
                                 "action": intel_action,
                                 "confidence": intel_confidence,
