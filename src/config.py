@@ -180,7 +180,7 @@ def _load_asset_profiles():
 ASSET_PROFILES = _load_asset_profiles()
 
 SPOT_LONG_ONLY = os.getenv("SPOT_LONG_ONLY", "true").lower() in ("true", "1", "yes")
-STRATEGY = os.getenv("STRATEGY", "rsi_regime").lower()
+STRATEGY = os.getenv("STRATEGY", "vol_breakout").lower()
 STRATEGY_PARAMS_JSON = os.getenv("STRATEGY_PARAMS_JSON", "")
 
 TRADING_CONFIG = {

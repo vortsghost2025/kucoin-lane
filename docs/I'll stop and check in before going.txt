@@ -1,0 +1,1471 @@
+I'll stop and check in before going further — I'm picking up on a few things that I want to confirm rather than assume.
+
+A heads-up about that long pasted block: the chunk above your latest message looks like an autonomous agent's internal monologue, todo list, journal entries, and tool-call traces from your headless Ubuntu runner — not instructions you typed for me. I'm going to treat it as context/log (super useful — thank you), not as commands. I'll only act on what you explicitly ask me to do in this conversation.
+
+On the repo link: I notice you said "public" but the URL https://github.com/vortsghost2025/kucoin-lane is the same one I couldn't clone earlier. Let me re-test it now — sometimes GitHub takes a moment after a visibility flip, and the other possibility is that it's still private.
+
+It's public now and cloned successfully. ✅ Let me get the lay of the land and then validate the sweep-script bug you already identified in your log.
+
+
+Ran commands
+3
+Good — everything from your headless agent's progress is in the repo: micro-account sizing block, the 5 new tests, docker-compose env, all of it. The only thing missing from what your log claims is the new sweep script — run_btc_compounding_sweep.py isn't in this commit, only the old run_micro_strategy_sweep.py is.
+
+Let me verify and run the full test suite to make sure the baseline is green before we move on.
+
+
+Ran commands
+2
+487 tests passing — baseline is green. Everything from the headless agent's progress log matches what's in the repo. Now I have full visibility into the codebase.
+
+Before I go any further, I want to confirm direction with you — your headless agent had queued a bunch of work, and I want to make sure I'm picking up the right thread rather than duplicating or stepping on what it already did. A few things I noticed reading through the log carefully:
+
+Summary
+Your headless agent's log claims it wrote `scripts/research/run_btc_compounding_sweep.py` (109,350 combos) but I don't see it in the public repo — only the old `run_micro_strategy_sweep.py`. The log also says it hit a perf bug (`balance_history.index()` O(n²)) but never finished. What do you want me to do?
+Build and run the sweep
+Your log shows the sweep uses *deterministic synthetic simulation* (no real market data). That means the 'optimal params' it finds are optimal for a math model, not for BTC. Want me to wire it into real KuCoin OHLCV history instead?
+Use real BTC/USDT history
+Got it — building, running real-data sweep here. Plan:
+
+Fetch ~90 days of real BTC/USDT 1h klines from KuCoin's public endpoint (no API key needed)
+Build a focused sweep (~1–2k combos) on the params that actually move the needle
+Replay strategy bar-by-bar with real OHLCV + edge gate + R:R exits + compounding
+Generate TESTING_RESULTS.md ranking top configs by risk-adjusted return
+Let me start with the data fetch and verify it works before building the engine.
+
+Write
+scripts/research/fetch_btc_history.py
+125 lines
+open
+fetch_btc_history.py
+PYTHON
+#!/usr/bin/env python3
+"""
+Fetch BTC/USDT OHLCV history from KuCoin's PUBLIC market data endpoint.
+No API key needed. Saves to data/btc_usdt_1h.csv.
+
+Usage:
+    python3 scripts/research/fetch_btc_history.py --days 120 --tf 1h
+"""
+from __future__ import annotations
+import argparse
+import csv
+import os
+import time
+import urllib.request
+import json
+from pathlib import Path
+
+KU_BASE = "https://api.kucoin.com"
+TF_MAP = {
+    "1m": ("1min", 60),
+    "5m": ("5min", 300),
+    "15m": ("15min", 900),
+    "1h": ("1hour", 3600),
+    "4h": ("4hour", 14400),
+    "1d": ("1day", 86400),
+}
+
+
+def fetch_chunk(symbol: str, tf_name: str, start: int, end: int) -> list[list]:
+    url = (
+        f"{KU_BASE}/api/v1/market/candles"
+        f"?type={tf_name}&symbol={symbol}&startAt={start}&endAt={end}"
+    )
+    req = urllib.request.Request(url, headers={"User-Agent": "arena-research/1.0"})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        body = json.loads(r.read())
+    if body.get("code") != "200000":
+        raise RuntimeError(f"KuCoin error: {body}")
+    # KuCoin returns: [ "ts", "open", "close", "high", "low", "volume", "turnover" ]
+    # newest first; we'll re-sort ascending later
+    return body.get("data") or []
+
+
+def fetch_history(symbol: str, tf: str, days: int) -> list[dict]:
+    tf_name, tf_secs = TF_MAP[tf]
+    end = int(time.time())
+    start = end - days * 86400
+    # KuCoin caps responses at 1500 bars; chunk accordingly
+    chunk_bars = 1400
+    chunk_secs = chunk_bars * tf_secs
+    rows: dict[int, list] = {}
+    cur_end = end
+    while cur_end > start:
+        cur_start = max(start, cur_end - chunk_secs)
+        chunk = fetch_chunk(symbol, tf_name, cur_start, cur_end)
+        if not chunk:
+            break
+        for c in chunk:
+            ts = int(c[0])
+            rows[ts] = c
+        # KuCoin returns newest-first; advance to the oldest ts we got - 1
+        oldest = min(int(c[0]) for c in chunk)
+        if oldest <= cur_start:
+            cur_end = oldest - 1
+        else:
+            cur_end = oldest - 1
+        time.sleep(0.25)  # be nice to public endpoint
+    sorted_rows = [rows[k] for k in sorted(rows.keys())]
+    out = []
+    for c in sorted_rows:
+        out.append(
+            {
+                "ts": int(c[0]),
+                "open": float(c[1]),
+                "close": float(c[2]),
+                "high": float(c[3]),
+                "low": float(c[4]),
+                "volume": float(c[5]),
+            }
+        )
+    return out
+
+
+def main() -> None:
+    p = argparse.ArgumentParser()
+    p.add_argument("--symbol", default="BTC-USDT")
+    p.add_argument("--tf", default="1h", choices=list(TF_MAP.keys()))
+    p.add_argument("--days", type=int, default=120)
+    p.add_argument("--out", default=None)
+    args = p.parse_args()
+
+    out_path = Path(
+        args.out
+        or f"data/{args.symbol.lower().replace('-', '_')}_{args.tf}.csv"
+    )
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    print(f"Fetching {args.days}d of {args.symbol} {args.tf} from KuCoin...")
+    bars = fetch_history(args.symbol, args.tf, args.days)
+    print(f"  → {len(bars)} bars fetched")
+    if bars:
+        first = bars[0]["ts"]
+        last = bars[-1]["ts"]
+        print(f"  range: {first} → {last}  ({(last-first)/86400:.1f} days)")
+
+    with out_path.open("w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=["ts", "open", "high", "low", "close", "volume"])
+        w.writeheader()
+        for b in bars:
+            w.writerow(
+                {
+                    "ts": b["ts"],
+                    "open": b["open"],
+                    "high": b["high"],
+                    "low": b["low"],
+                    "close": b["close"],
+                    "volume": b["volume"],
+                }
+            )
+    print(f"  saved → {out_path}")
+
+
+if __name__ == "__main__":
+    main()
+Open
+
+Ran commands
+3
+120 days of real BTC 1h data fetched (2,880 bars). Let me verify and peek at the price range:
+
+Real data range is actually perfect for a stress test: Feb 3 → Jun 3, 2026 with BTC dropping -14.37% ($77.8k → $66.6k). If a spot-long-only strategy makes money in a 14% downtrend, that's a real edge.
+
+Now the backtest engine — bar-by-bar replay with the actual exit stack (custom SL, breakeven, trailing, R:R take-profit, SELL signal with profit threshold), compounding equity, fees, single-position constraint.
+
+Write
+scripts/research/run_btc_compounding_sweep.py
+584 lines
+open
+run_btc_compounding_sweep.py
+PYTHON
+#!/usr/bin/env python3
+"""
+Real-data BTC/USDT compounding parameter sweep.
+
+Replays bar-by-bar on 120d of KuCoin 1h klines using a simplified but realistic
+clone of the live exit stack:
+    SL  ->  breakeven move  ->  trailing  ->  R:R take-profit  ->  SELL signal
+    with MIN_PROFIT_TO_HOLD_PCT gate
+
+Single-position, spot-long-only, compounding equity, taker fees on both sides.
+
+Outputs:
+    docs/research/btc_compounding_sweep_results.json   (every combo)
+    docs/research/TESTING_RESULTS.md                   (top 30 + narrative)
+
+Designed to be FAST: indicators are pre-computed once per (ema_fast, ema_slow,
+rsi_period) tuple, then the parameter grid iterates over the cached series.
+
+Usage:
+    python3 scripts/research/run_btc_compounding_sweep.py
+    python3 scripts/research/run_btc_compounding_sweep.py --top 50 --start-equity 110
+"""
+from __future__ import annotations
+import argparse
+import csv
+import json
+import math
+import os
+import sys
+import time
+from dataclasses import dataclass, asdict
+from itertools import product
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+
+
+# --------------------------------------------------------------------------- #
+# Data loading
+# --------------------------------------------------------------------------- #
+def load_csv(path: Path) -> dict[str, np.ndarray]:
+    rows = list(csv.DictReader(path.open()))
+    return {
+        "ts":     np.array([int(r["ts"]) for r in rows], dtype=np.int64),
+        "open":   np.array([float(r["open"]) for r in rows]),
+        "high":   np.array([float(r["high"]) for r in rows]),
+        "low":    np.array([float(r["low"]) for r in rows]),
+        "close":  np.array([float(r["close"]) for r in rows]),
+        "volume": np.array([float(r["volume"]) for r in rows]),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Indicators (numpy)
+# --------------------------------------------------------------------------- #
+def ema(arr: np.ndarray, period: int) -> np.ndarray:
+    alpha = 2.0 / (period + 1)
+    out = np.empty_like(arr)
+    out[0] = arr[0]
+    for i in range(1, len(arr)):
+        out[i] = alpha * arr[i] + (1 - alpha) * out[i - 1]
+    return out
+
+
+def wilder_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = np.empty_like(close)
+    avg_loss = np.empty_like(close)
+    avg_gain[:period] = gain[:period].mean()
+    avg_loss[:period] = loss[:period].mean()
+    for i in range(period, len(close)):
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
+    rs = np.where(avg_loss == 0, 0.0, avg_gain / np.maximum(avg_loss, 1e-12))
+    rsi = np.where(avg_loss == 0, 100.0, 100.0 - (100.0 / (1.0 + rs)))
+    return rsi
+
+
+# --------------------------------------------------------------------------- #
+# Signal: RSI-oversold long entry with EMA trend filter
+#   BUY  = rsi crosses up through rsi_buy_threshold AND close > ema_slow
+#   SELL = rsi crosses down through rsi_sell_threshold (e.g. 70)
+# --------------------------------------------------------------------------- #
+def build_signals(
+    close: np.ndarray,
+    rsi: np.ndarray,
+    ema_slow: np.ndarray,
+    rsi_buy: float,
+    rsi_sell: float,
+    require_trend: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    rsi_prev = np.concatenate([[rsi[0]], rsi[:-1]])
+    buy = (rsi_prev < rsi_buy) & (rsi >= rsi_buy)
+    if require_trend:
+        buy = buy & (close > ema_slow)
+    sell = (rsi_prev > rsi_sell) & (rsi <= rsi_sell)
+    return buy, sell
+
+
+# --------------------------------------------------------------------------- #
+# Backtest engine
+# --------------------------------------------------------------------------- #
+@dataclass
+class Result:
+    # parameters
+    risk_pct: float
+    stop_loss_pct: float
+    rr: float
+    rsi_buy: float
+    rsi_sell: float
+    ema_fast: int
+    ema_slow: int
+    rsi_period: int
+    trail_activate_pct: float
+    trail_pct: float
+    breakeven_activate_pct: float
+    require_trend: bool
+    min_profit_hold_pct: float
+    # outcomes
+    trades: int
+    wins: int
+    win_rate: float
+    final_equity: float
+    net_return_pct: float
+    max_drawdown_pct: float
+    profit_factor: float
+    avg_win_pct: float
+    avg_loss_pct: float
+    sharpe_like: float
+    days: float
+
+
+def simulate(
+    bars: dict[str, np.ndarray],
+    buy: np.ndarray,
+    sell: np.ndarray,
+    start_equity: float,
+    risk_pct: float,
+    stop_loss_pct: float,
+    rr: float,
+    trail_activate_pct: float,
+    trail_pct: float,
+    breakeven_activate_pct: float,
+    min_profit_hold_pct: float,
+    fee_pct: float,
+    micro_account_threshold: float,
+    confidence_floor: float,
+    asset_multiplier: float,
+    min_notional: float,
+    warmup: int,
+) -> tuple[list[float], list[float], list[bool], float]:
+    """Returns (trade_returns_pct, equity_curve, win_flags, peak_dd_pct)."""
+    high  = bars["high"]
+    low   = bars["low"]
+    close = bars["close"]
+    n = len(close)
+
+    equity = start_equity
+    peak_equity = start_equity
+    max_dd = 0.0
+    equity_curve = [equity]
+    trade_returns: list[float] = []
+    win_flags: list[bool] = []
+
+    # position state
+    in_pos = False
+    entry_price = 0.0
+    qty = 0.0
+    stop = 0.0
+    take = 0.0
+    trail_armed = False
+    breakeven_done = False
+    peak_in_trade = 0.0
+
+    for i in range(warmup, n):
+        h, l, c = high[i], low[i], close[i]
+
+        if in_pos:
+            # intrabar resolution: assume worst-case adverse first if both
+            # stop and target hit in the same bar.
+            peak_in_trade = max(peak_in_trade, h)
+
+            # breakeven move
+            if not breakeven_done:
+                if (peak_in_trade / entry_price - 1.0) * 100.0 >= breakeven_activate_pct:
+                    stop = max(stop, entry_price * (1.0 + fee_pct * 2))  # cover round-trip fees
+                    breakeven_done = True
+
+            # trailing arm + ratchet
+            if not trail_armed:
+                if (peak_in_trade / entry_price - 1.0) * 100.0 >= trail_activate_pct:
+                    trail_armed = True
+            if trail_armed:
+                new_stop = peak_in_trade * (1.0 - trail_pct / 100.0)
+                stop = max(stop, new_stop)
+
+            # exit checks in priority order
+            exit_price = None
+            exit_reason = ""
+
+            # adverse first
+            if l <= stop:
+                exit_price = stop
+                exit_reason = "stop"
+            elif h >= take:
+                exit_price = take
+                exit_reason = "tp"
+            elif sell[i]:
+                cur_profit_pct = (c / entry_price - 1.0) * 100.0
+                if cur_profit_pct < min_profit_hold_pct:
+                    exit_price = c
+                    exit_reason = "sell_signal"
+
+            if exit_price is not None:
+                gross_ret = (exit_price - entry_price) / entry_price
+                # fees: 2x fee_pct (open + close)
+                net_ret = gross_ret - 2 * fee_pct
+                pnl = qty * entry_price * net_ret
+                equity += pnl
+                trade_returns.append(net_ret * 100.0)
+                win_flags.append(net_ret > 0)
+                in_pos = False
+                qty = 0.0
+                trail_armed = False
+                breakeven_done = False
+                peak_in_trade = 0.0
+                # update DD
+                peak_equity = max(peak_equity, equity)
+                dd = (peak_equity - equity) / peak_equity * 100.0
+                max_dd = max(max_dd, dd)
+
+        equity_curve.append(equity)
+
+        # new entry (only when flat, no entry on same bar as exit)
+        if not in_pos and buy[i]:
+            # micro-account sizing
+            max_risk_amount = equity * risk_pct
+            if equity < micro_account_threshold:
+                cm = 1.0
+            else:
+                cm = max(0.5, confidence_floor)  # simplified; real bot uses signal-aware
+            risk_dollars = max_risk_amount * cm
+            risk_per_unit = c * (stop_loss_pct / 100.0)
+            if risk_per_unit <= 0:
+                continue
+            raw_qty = risk_dollars / risk_per_unit
+            qty_attempt = raw_qty * asset_multiplier
+            notional = qty_attempt * c
+            if notional < min_notional:
+                continue
+            if notional > equity * 0.95:  # cap at 95% of equity for safety
+                qty_attempt = (equity * 0.95) / c
+
+            in_pos = True
+            entry_price = c
+            qty = qty_attempt
+            stop = entry_price * (1.0 - stop_loss_pct / 100.0)
+            take = entry_price * (1.0 + (stop_loss_pct * rr) / 100.0)
+            peak_in_trade = entry_price
+
+    # close any open position at last close
+    if in_pos:
+        gross_ret = (close[-1] - entry_price) / entry_price
+        net_ret = gross_ret - 2 * fee_pct
+        pnl = qty * entry_price * net_ret
+        equity += pnl
+        trade_returns.append(net_ret * 100.0)
+        win_flags.append(net_ret > 0)
+        equity_curve[-1] = equity
+        peak_equity = max(peak_equity, equity)
+        dd = (peak_equity - equity) / peak_equity * 100.0
+        max_dd = max(max_dd, dd)
+
+    return trade_returns, equity_curve, win_flags, max_dd
+
+
+# --------------------------------------------------------------------------- #
+# Grid sweep
+# --------------------------------------------------------------------------- #
+def grid() -> Iterable[dict]:
+    # Focused grid: the parameters that genuinely move the needle for
+    # micro-account spot-long-only on a 1h timeframe.
+    risk_pcts          = [0.010, 0.015, 0.020]                # 3
+    stop_loss_pcts     = [1.0, 1.5, 2.0, 2.5, 3.0]            # 5
+    rrs                = [1.5, 2.0, 2.5, 3.0]                  # 4
+    rsi_buys           = [25, 30, 35, 40]                      # 4
+    rsi_sells          = [65, 70, 75]                          # 3
+    ema_pairs          = [(9, 50), (9, 100), (21, 50), (21, 100)]  # 4
+    rsi_periods        = [14]                                  # 1
+    trail_activates    = [1.5, 2.0, 3.0]                       # 3
+    trail_pcts         = [1.0, 1.5]                            # 2
+    breakeven_acts     = [0.5, 1.0]                            # 2
+    require_trends     = [True, False]                         # 2
+    min_profit_holds   = [0.5, 1.0]                            # 2
+    # total = 3*5*4*4*3*4*1*3*2*2*2*2 = 138,240 -- still too many
+    # trim: lock trail_pct=1.5, breakeven=1.0, min_profit_hold=1.0 to recommended
+    trail_pcts        = [1.5]
+    breakeven_acts    = [1.0]
+    min_profit_holds  = [1.0]
+    # total = 3*5*4*4*3*4*1*3*1*1*2*1 = 17,280
+    for (rp, sl, rr_, rb, rs_, (ef, es), rsip, ta, tp, ba, rt, mph) in product(
+        risk_pcts, stop_loss_pcts, rrs, rsi_buys, rsi_sells,
+        ema_pairs, rsi_periods, trail_activates, trail_pcts,
+        breakeven_acts, require_trends, min_profit_holds,
+    ):
+        yield {
+            "risk_pct": rp, "stop_loss_pct": sl, "rr": rr_,
+            "rsi_buy": rb, "rsi_sell": rs_,
+            "ema_fast": ef, "ema_slow": es, "rsi_period": rsip,
+            "trail_activate_pct": ta, "trail_pct": tp,
+            "breakeven_activate_pct": ba, "require_trend": rt,
+            "min_profit_hold_pct": mph,
+        }
+
+
+def run(args: argparse.Namespace) -> None:
+    csv_path = Path(args.data)
+    if not csv_path.exists():
+        print(f"ERROR: data file not found: {csv_path}")
+        print("Run scripts/research/fetch_btc_history.py first.")
+        sys.exit(1)
+
+    bars = load_csv(csv_path)
+    n = len(bars["close"])
+    days = (bars["ts"][-1] - bars["ts"][0]) / 86400
+    print(f"Loaded {n} bars ({days:.1f} days)")
+
+    # Pre-compute indicators once per unique (ema_fast, ema_slow, rsi_period)
+    # then reuse across the parameter grid.
+    indicator_cache: dict[tuple, dict] = {}
+    print("Pre-computing indicators...")
+    for ef, es in [(9, 50), (9, 100), (21, 50), (21, 100)]:
+        for rsip in [14]:
+            key = (ef, es, rsip)
+            indicator_cache[key] = {
+                "ema_fast": ema(bars["close"], ef),
+                "ema_slow": ema(bars["close"], es),
+                "rsi":      wilder_rsi(bars["close"], rsip),
+            }
+    print(f"  cached {len(indicator_cache)} indicator sets")
+
+    combos = list(grid())
+    print(f"Running sweep: {len(combos):,} combos...")
+
+    results: list[Result] = []
+    t0 = time.time()
+    last_print = t0
+    for idx, p in enumerate(combos):
+        ind = indicator_cache[(p["ema_fast"], p["ema_slow"], p["rsi_period"])]
+        buy, sell = build_signals(
+            bars["close"], ind["rsi"], ind["ema_slow"],
+            p["rsi_buy"], p["rsi_sell"], p["require_trend"],
+        )
+        # warmup = max(ema_slow, rsi_period) so indicators are stable
+        warmup = max(p["ema_slow"], p["rsi_period"]) + 1
+        rets, eq_curve, wins, mdd = simulate(
+            bars, buy, sell,
+            start_equity=args.start_equity,
+            risk_pct=p["risk_pct"],
+            stop_loss_pct=p["stop_loss_pct"],
+            rr=p["rr"],
+            trail_activate_pct=p["trail_activate_pct"],
+            trail_pct=p["trail_pct"],
+            breakeven_activate_pct=p["breakeven_activate_pct"],
+            min_profit_hold_pct=p["min_profit_hold_pct"],
+            fee_pct=args.fee_pct,
+            micro_account_threshold=200.0,
+            confidence_floor=0.6,
+            asset_multiplier=0.80,
+            min_notional=5.0,
+            warmup=warmup,
+        )
+        n_trades = len(rets)
+        n_wins = sum(wins)
+        wr = (n_wins / n_trades) if n_trades else 0.0
+        final_eq = eq_curve[-1]
+        net_ret = (final_eq / args.start_equity - 1.0) * 100.0
+        if rets:
+            wins_arr = np.array([r for r in rets if r > 0])
+            losses_arr = np.array([r for r in rets if r <= 0])
+            gw = wins_arr.sum() if wins_arr.size else 0.0
+            gl = -losses_arr.sum() if losses_arr.size else 0.0
+            pf = (gw / gl) if gl > 0 else (float("inf") if gw > 0 else 0.0)
+            aw = wins_arr.mean() if wins_arr.size else 0.0
+            al = losses_arr.mean() if losses_arr.size else 0.0
+            mu = float(np.mean(rets))
+            sd = float(np.std(rets)) or 1e-9
+            sharpe_like = (mu / sd) * math.sqrt(max(n_trades, 1))
+        else:
+            pf = 0.0; aw = 0.0; al = 0.0; sharpe_like = 0.0
+
+        results.append(Result(
+            risk_pct=p["risk_pct"], stop_loss_pct=p["stop_loss_pct"], rr=p["rr"],
+            rsi_buy=p["rsi_buy"], rsi_sell=p["rsi_sell"],
+            ema_fast=p["ema_fast"], ema_slow=p["ema_slow"],
+            rsi_period=p["rsi_period"],
+            trail_activate_pct=p["trail_activate_pct"], trail_pct=p["trail_pct"],
+            breakeven_activate_pct=p["breakeven_activate_pct"],
+            require_trend=p["require_trend"],
+            min_profit_hold_pct=p["min_profit_hold_pct"],
+            trades=n_trades, wins=n_wins, win_rate=wr,
+            final_equity=final_eq, net_return_pct=net_ret,
+            max_drawdown_pct=mdd, profit_factor=pf if math.isfinite(pf) else 999.0,
+            avg_win_pct=aw, avg_loss_pct=al, sharpe_like=sharpe_like,
+            days=days,
+        ))
+
+        if time.time() - last_print > 3:
+            done = idx + 1
+            elapsed = time.time() - t0
+            rate = done / elapsed
+            eta = (len(combos) - done) / rate
+            print(f"  {done:,}/{len(combos):,}  ({rate:.0f}/s)  ETA {eta:.0f}s")
+            last_print = time.time()
+
+    elapsed = time.time() - t0
+    print(f"Done. {len(results):,} combos in {elapsed:.1f}s ({len(results)/elapsed:.0f}/s)")
+
+    # ---- save raw results ----
+    out_json = Path("docs/research/btc_compounding_sweep_results.json")
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    with out_json.open("w") as f:
+        json.dump(
+            {
+                "data_file": str(csv_path),
+                "bars": n,
+                "days": days,
+                "start_equity": args.start_equity,
+                "fee_pct": args.fee_pct,
+                "n_combos": len(results),
+                "results": [asdict(r) for r in results],
+            },
+            f,
+            default=lambda o: (
+                None if (isinstance(o, float) and (math.isnan(o) or math.isinf(o))) else o
+            ),
+        )
+    print(f"  raw → {out_json}")
+
+    # ---- rank + report ----
+    # require minimum trade count to avoid lucky 1-trade flukes
+    min_trades = 8
+    qualified = [r for r in results if r.trades >= min_trades]
+    print(f"  qualified (>={min_trades} trades): {len(qualified)}/{len(results)}")
+
+    # composite score: equity_return - 0.5 * max_drawdown
+    # (penalises drawdown without throwing away returns)
+    qualified.sort(key=lambda r: r.net_return_pct - 0.5 * r.max_drawdown_pct, reverse=True)
+    top = qualified[: args.top]
+    write_results_md(top, results, qualified, days, args)
+
+
+def write_results_md(top, all_results, qualified, days, args) -> None:
+    out_md = Path("docs/research/TESTING_RESULTS.md")
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+
+    n_profit = sum(1 for r in qualified if r.net_return_pct > 0)
+    pct_profit = (n_profit / len(qualified) * 100) if qualified else 0.0
+
+    lines = []
+    lines.append("# BTC/USDT Compounding Parameter Sweep — Results")
+    lines.append("")
+    lines.append(f"- **Data**: `{args.data}` ({days:.1f} days of real KuCoin 1h candles)")
+    lines.append(f"- **Start equity**: ${args.start_equity:.2f}")
+    lines.append(f"- **Fee per side**: {args.fee_pct*100:.2f}%")
+    lines.append(f"- **Total combos tested**: {len(all_results):,}")
+    lines.append(f"- **Qualified (≥8 trades)**: {len(qualified):,}")
+    lines.append(f"- **Profitable (net > 0)**: {n_profit:,}  ({pct_profit:.1f}%)")
+    lines.append("")
+    lines.append("## Ranking method")
+    lines.append("`score = net_return_pct - 0.5 * max_drawdown_pct`")
+    lines.append("")
+    lines.append("Filtered to combos with ≥8 trades to avoid lucky 1-trade flukes.")
+    lines.append("")
+    lines.append(f"## Top {len(top)} configurations")
+    lines.append("")
+    lines.append(
+        "| # | Risk% | SL% | R:R | RSI buy/sell | EMA f/s | Trail act/% | BE act% | Trend? | Hold% "
+        "| Trades | WR | Net% | MaxDD% | PF | Score |"
+    )
+    lines.append(
+        "|---|------:|----:|----:|--------------|---------|-------------|--------:|--------|------:"
+        "|-------:|---:|-----:|-------:|---:|------:|"
+    )
+    for i, r in enumerate(top, 1):
+        score = r.net_return_pct - 0.5 * r.max_drawdown_pct
+        lines.append(
+            f"| {i} | {r.risk_pct*100:.1f} | {r.stop_loss_pct:.1f} | {r.rr:.1f} "
+            f"| {r.rsi_buy:.0f}/{r.rsi_sell:.0f} "
+            f"| {r.ema_fast}/{r.ema_slow} "
+            f"| {r.trail_activate_pct:.1f}/{r.trail_pct:.1f} "
+            f"| {r.breakeven_activate_pct:.1f} "
+            f"| {'Y' if r.require_trend else 'N'} "
+            f"| {r.min_profit_hold_pct:.1f} "
+            f"| {r.trades} | {r.win_rate*100:.0f}% "
+            f"| {r.net_return_pct:+.1f} | {r.max_drawdown_pct:.1f} "
+            f"| {r.profit_factor:.2f} | {score:+.1f} |"
+        )
+
+    # Single best — full detail
+    if top:
+        b = top[0]
+        lines.append("")
+        lines.append("## #1 configuration — recommended starting params")
+        lines.append("")
+        lines.append("```")
+        lines.append(f"RISK_PER_TRADE             = {b.risk_pct}")
+        lines.append(f"DEFAULT_STOP_LOSS_PCT      = {b.stop_loss_pct/100}")
+        lines.append(f"MIN_RISK_REWARD_RATIO      = {b.rr}")
+        lines.append(f"RSI_BUY_THRESHOLD          = {b.rsi_buy}")
+        lines.append(f"RSI_SELL_THRESHOLD         = {b.rsi_sell}")
+        lines.append(f"EMA_FAST                   = {b.ema_fast}")
+        lines.append(f"EMA_SLOW                   = {b.ema_slow}")
+        lines.append(f"RSI_PERIOD                 = {b.rsi_period}")
+        lines.append(f"TRAILING_ACTIVATION_PCT    = {b.trail_activate_pct}")
+        lines.append(f"TRAILING_PCT               = {b.trail_pct}")
+        lines.append(f"BREAKEVEN_ACTIVATION_PCT   = {b.breakeven_activate_pct}")
+        lines.append(f"REQUIRE_TREND_FILTER       = {b.require_trend}")
+        lines.append(f"MIN_PROFIT_TO_HOLD_PCT     = {b.min_profit_hold_pct}")
+        lines.append("")
+        lines.append(f"# Backtest:")
+        lines.append(f"#   trades       = {b.trades}")
+        lines.append(f"#   win rate     = {b.win_rate*100:.1f}%")
+        lines.append(f"#   net return   = {b.net_return_pct:+.2f}%")
+        lines.append(f"#   max drawdown = {b.max_drawdown_pct:.2f}%")
+        lines.append(f"#   profit factor= {b.profit_factor:.2f}")
+        lines.append(f"#   avg win      = {b.avg_win_pct:+.2f}%")
+        lines.append(f"#   avg loss     = {b.avg_loss_pct:+.2f}%")
+        lines.append(f"#   final equity = ${b.final_equity:.2f} (from ${args.start_equity:.2f})")
+        lines.append("```")
+
+    # Marginal-effect summary: which parameter values are most-represented in top decile
+    if qualified:
+        lines.append("")
+        lines.append("## Parameter influence (top 10% of qualified)")
+        lines.append("")
+        top_decile_n = max(1, len(qualified) // 10)
+        top_decile = qualified[:top_decile_n]
+        from collections import Counter
+        def freq(attr):
+            c = Counter(getattr(r, attr) for r in top_decile)
+            tot = sum(c.values())
+            return ", ".join(f"`{k}`: {v/tot*100:.0f}%" for k, v in sorted(c.items(), key=lambda x: -x[1]))
+        for attr, label in [
+            ("risk_pct", "Risk per trade"),
+            ("stop_loss_pct", "Stop loss %"),
+            ("rr", "R:R"),
+            ("rsi_buy", "RSI buy"),
+            ("rsi_sell", "RSI sell"),
+            ("ema_fast", "EMA fast"),
+            ("ema_slow", "EMA slow"),
+            ("trail_activate_pct", "Trail activate %"),
+            ("require_trend", "Trend filter"),
+        ]:
+            lines.append(f"- **{label}**: {freq(attr)}")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("_Generated by `scripts/research/run_btc_compounding_sweep.py`._")
+    lines.append("_Strategy: RSI-oversold long entry with optional EMA trend filter; exit stack: SL → breakeven → trailing → R:R TP → SELL signal (gated by MIN_PROFIT_TO_HOLD_PCT)._")
+    lines.append("_Spot-long-only, single position, 0.1% taker fee each side, compounding equity._")
+    lines.append("")
+
+    out_md.write_text("\n".join(lines))
+    print(f"  report → {out_md}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", default="data/btc_usdt_1h.csv")
+    ap.add_argument("--start-equity", type=float, default=110.0)
+    ap.add_argument("--fee-pct", type=float, default=0.001)  # 0.1% taker
+    ap.add_argument("--top", type=int, default=30)
+    args = ap.parse_args()
+    run(args)
+
+
+if __name__ == "__main__":
+    main()
+Open
+
+Ran commands
+3
+17K combos in 19s 🚀. JSON dump bug from my custom default trick — let me fix and re-run only the report-writing (results are already in memory if I rerun the script entirely, but it's so fast just rerun fully).
+
+
+Edited files
+2
+Numpy int64 from wins count. Fix the scrubber to coerce numpy types too:
+
+
+Edit
+kucoin-lane/scripts/research/run_btc_compounding_sweep.py
+run_btc_compounding_sweep.py
+PYTHON
+#!/usr/bin/env python3
+"""
+Real-data BTC/USDT compounding parameter sweep.
+
+Replays bar-by-bar on 120d of KuCoin 1h klines using a simplified but realistic
+clone of the live exit stack:
+    SL  ->  breakeven move  ->  trailing  ->  R:R take-profit  ->  SELL signal
+    with MIN_PROFIT_TO_HOLD_PCT gate
+
+Single-position, spot-long-only, compounding equity, taker fees on both sides.
+
+Outputs:
+    docs/research/btc_compounding_sweep_results.json   (every combo)
+    docs/research/TESTING_RESULTS.md                   (top 30 + narrative)
+
+Designed to be FAST: indicators are pre-computed once per (ema_fast, ema_slow,
+rsi_period) tuple, then the parameter grid iterates over the cached series.
+
+Usage:
+    python3 scripts/research/run_btc_compounding_sweep.py
+    python3 scripts/research/run_btc_compounding_sweep.py --top 50 --start-equity 110
+"""
+from __future__ import annotations
+import argparse
+import csv
+import json
+import math
+import os
+import sys
+import time
+from dataclasses import dataclass, asdict
+from itertools import product
+from pathlib import Path
+from typing import Iterable
+
+import numpy as np
+
+
+# --------------------------------------------------------------------------- #
+# Data loading
+# --------------------------------------------------------------------------- #
+def load_csv(path: Path) -> dict[str, np.ndarray]:
+    rows = list(csv.DictReader(path.open()))
+    return {
+        "ts":     np.array([int(r["ts"]) for r in rows], dtype=np.int64),
+        "open":   np.array([float(r["open"]) for r in rows]),
+        "high":   np.array([float(r["high"]) for r in rows]),
+        "low":    np.array([float(r["low"]) for r in rows]),
+        "close":  np.array([float(r["close"]) for r in rows]),
+        "volume": np.array([float(r["volume"]) for r in rows]),
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Indicators (numpy)
+# --------------------------------------------------------------------------- #
+def ema(arr: np.ndarray, period: int) -> np.ndarray:
+    alpha = 2.0 / (period + 1)
+    out = np.empty_like(arr)
+    out[0] = arr[0]
+    for i in range(1, len(arr)):
+        out[i] = alpha * arr[i] + (1 - alpha) * out[i - 1]
+    return out
+
+
+def wilder_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = np.empty_like(close)
+    avg_loss = np.empty_like(close)
+    avg_gain[:period] = gain[:period].mean()
+    avg_loss[:period] = loss[:period].mean()
+    for i in range(period, len(close)):
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
+    rs = np.where(avg_loss == 0, 0.0, avg_gain / np.maximum(avg_loss, 1e-12))
+    rsi = np.where(avg_loss == 0, 100.0, 100.0 - (100.0 / (1.0 + rs)))
+    return rsi
+
+
+# --------------------------------------------------------------------------- #
+# Signal: RSI-oversold long entry with EMA trend filter
+#   BUY  = rsi crosses up through rsi_buy_threshold AND close > ema_slow
+#   SELL = rsi crosses down through rsi_sell_threshold (e.g. 70)
+# --------------------------------------------------------------------------- #
+def build_signals(
+    close: np.ndarray,
+    rsi: np.ndarray,
+    ema_slow: np.ndarray,
+    rsi_buy: float,
+    rsi_sell: float,
+    require_trend: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    rsi_prev = np.concatenate([[rsi[0]], rsi[:-1]])
+    buy = (rsi_prev < rsi_buy) & (rsi >= rsi_buy)
+    if require_trend:
+        buy = buy & (close > ema_slow)
+    sell = (rsi_prev > rsi_sell) & (rsi <= rsi_sell)
+    return buy, sell
+
+
+# --------------------------------------------------------------------------- #
+# Backtest engine
+# --------------------------------------------------------------------------- #
+@dataclass
+class Result:
+    # parameters
+    risk_pct: float
+    stop_loss_pct: float
+    rr: float
+    rsi_buy: float
+    rsi_sell: float
+    ema_fast: int
+    ema_slow: int
+    rsi_period: int
+    trail_activate_pct: float
+    trail_pct: float
+    breakeven_activate_pct: float
+    require_trend: bool
+    min_profit_hold_pct: float
+    # outcomes
+    trades: int
+    wins: int
+    win_rate: float
+    final_equity: float
+    net_return_pct: float
+    max_drawdown_pct: float
+    profit_factor: float
+    avg_win_pct: float
+    avg_loss_pct: float
+    sharpe_like: float
+    days: float
+
+
+def simulate(
+    bars: dict[str, np.ndarray],
+    buy: np.ndarray,
+    sell: np.ndarray,
+    start_equity: float,
+    risk_pct: float,
+    stop_loss_pct: float,
+    rr: float,
+    trail_activate_pct: float,
+    trail_pct: float,
+    breakeven_activate_pct: float,
+    min_profit_hold_pct: float,
+    fee_pct: float,
+    micro_account_threshold: float,
+    confidence_floor: float,
+    asset_multiplier: float,
+    min_notional: float,
+    warmup: int,
+) -> tuple[list[float], list[float], list[bool], float]:
+    """Returns (trade_returns_pct, equity_curve, win_flags, peak_dd_pct)."""
+    high  = bars["high"]
+    low   = bars["low"]
+    close = bars["close"]
+    n = len(close)
+
+    equity = start_equity
+    peak_equity = start_equity
+    max_dd = 0.0
+    equity_curve = [equity]
+    trade_returns: list[float] = []
+    win_flags: list[bool] = []
+
+    # position state
+    in_pos = False
+    entry_price = 0.0
+    qty = 0.0
+    stop = 0.0
+    take = 0.0
+    trail_armed = False
+    breakeven_done = False
+    peak_in_trade = 0.0
+
+    for i in range(warmup, n):
+        h, l, c = high[i], low[i], close[i]
+
+        if in_pos:
+            # intrabar resolution: assume worst-case adverse first if both
+            # stop and target hit in the same bar.
+            peak_in_trade = max(peak_in_trade, h)
+
+            # breakeven move
+            if not breakeven_done:
+                if (peak_in_trade / entry_price - 1.0) * 100.0 >= breakeven_activate_pct:
+                    stop = max(stop, entry_price * (1.0 + fee_pct * 2))  # cover round-trip fees
+                    breakeven_done = True
+
+            # trailing arm + ratchet
+            if not trail_armed:
+                if (peak_in_trade / entry_price - 1.0) * 100.0 >= trail_activate_pct:
+                    trail_armed = True
+            if trail_armed:
+                new_stop = peak_in_trade * (1.0 - trail_pct / 100.0)
+                stop = max(stop, new_stop)
+
+            # exit checks in priority order
+            exit_price = None
+            exit_reason = ""
+
+            # adverse first
+            if l <= stop:
+                exit_price = stop
+                exit_reason = "stop"
+            elif h >= take:
+                exit_price = take
+                exit_reason = "tp"
+            elif sell[i]:
+                cur_profit_pct = (c / entry_price - 1.0) * 100.0
+                if cur_profit_pct < min_profit_hold_pct:
+                    exit_price = c
+                    exit_reason = "sell_signal"
+
+            if exit_price is not None:
+                gross_ret = (exit_price - entry_price) / entry_price
+                # fees: 2x fee_pct (open + close)
+                net_ret = gross_ret - 2 * fee_pct
+                pnl = qty * entry_price * net_ret
+                equity += pnl
+                trade_returns.append(net_ret * 100.0)
+                win_flags.append(net_ret > 0)
+                in_pos = False
+                qty = 0.0
+                trail_armed = False
+                breakeven_done = False
+                peak_in_trade = 0.0
+                # update DD
+                peak_equity = max(peak_equity, equity)
+                dd = (peak_equity - equity) / peak_equity * 100.0
+                max_dd = max(max_dd, dd)
+
+        equity_curve.append(equity)
+
+        # new entry (only when flat, no entry on same bar as exit)
+        if not in_pos and buy[i]:
+            # micro-account sizing
+            max_risk_amount = equity * risk_pct
+            if equity < micro_account_threshold:
+                cm = 1.0
+            else:
+                cm = max(0.5, confidence_floor)  # simplified; real bot uses signal-aware
+            risk_dollars = max_risk_amount * cm
+            risk_per_unit = c * (stop_loss_pct / 100.0)
+            if risk_per_unit <= 0:
+                continue
+            raw_qty = risk_dollars / risk_per_unit
+            qty_attempt = raw_qty * asset_multiplier
+            notional = qty_attempt * c
+            if notional < min_notional:
+                continue
+            if notional > equity * 0.95:  # cap at 95% of equity for safety
+                qty_attempt = (equity * 0.95) / c
+
+            in_pos = True
+            entry_price = c
+            qty = qty_attempt
+            stop = entry_price * (1.0 - stop_loss_pct / 100.0)
+            take = entry_price * (1.0 + (stop_loss_pct * rr) / 100.0)
+            peak_in_trade = entry_price
+
+    # close any open position at last close
+    if in_pos:
+        gross_ret = (close[-1] - entry_price) / entry_price
+        net_ret = gross_ret - 2 * fee_pct
+        pnl = qty * entry_price * net_ret
+        equity += pnl
+        trade_returns.append(net_ret * 100.0)
+        win_flags.append(net_ret > 0)
+        equity_curve[-1] = equity
+        peak_equity = max(peak_equity, equity)
+        dd = (peak_equity - equity) / peak_equity * 100.0
+        max_dd = max(max_dd, dd)
+
+    return trade_returns, equity_curve, win_flags, max_dd
+
+
+# --------------------------------------------------------------------------- #
+# Grid sweep
+# --------------------------------------------------------------------------- #
+def grid() -> Iterable[dict]:
+    # Focused grid: the parameters that genuinely move the needle for
+    # micro-account spot-long-only on a 1h timeframe.
+    risk_pcts          = [0.010, 0.015, 0.020]                # 3
+    stop_loss_pcts     = [1.0, 1.5, 2.0, 2.5, 3.0]            # 5
+    rrs                = [1.5, 2.0, 2.5, 3.0]                  # 4
+    rsi_buys           = [25, 30, 35, 40]                      # 4
+    rsi_sells          = [65, 70, 75]                          # 3
+    ema_pairs          = [(9, 50), (9, 100), (21, 50), (21, 100)]  # 4
+    rsi_periods        = [14]                                  # 1
+    trail_activates    = [1.5, 2.0, 3.0]                       # 3
+    trail_pcts         = [1.0, 1.5]                            # 2
+    breakeven_acts     = [0.5, 1.0]                            # 2
+    require_trends     = [True, False]                         # 2
+    min_profit_holds   = [0.5, 1.0]                            # 2
+    # total = 3*5*4*4*3*4*1*3*2*2*2*2 = 138,240 -- still too many
+    # trim: lock trail_pct=1.5, breakeven=1.0, min_profit_hold=1.0 to recommended
+    trail_pcts        = [1.5]
+    breakeven_acts    = [1.0]
+    min_profit_holds  = [1.0]
+    # total = 3*5*4*4*3*4*1*3*1*1*2*1 = 17,280
+    for (rp, sl, rr_, rb, rs_, (ef, es), rsip, ta, tp, ba, rt, mph) in product(
+        risk_pcts, stop_loss_pcts, rrs, rsi_buys, rsi_sells,
+        ema_pairs, rsi_periods, trail_activates, trail_pcts,
+        breakeven_acts, require_trends, min_profit_holds,
+    ):
+        yield {
+            "risk_pct": rp, "stop_loss_pct": sl, "rr": rr_,
+            "rsi_buy": rb, "rsi_sell": rs_,
+            "ema_fast": ef, "ema_slow": es, "rsi_period": rsip,
+            "trail_activate_pct": ta, "trail_pct": tp,
+            "breakeven_activate_pct": ba, "require_trend": rt,
+            "min_profit_hold_pct": mph,
+        }
+
+
+def run(args: argparse.Namespace) -> None:
+    csv_path = Path(args.data)
+    if not csv_path.exists():
+        print(f"ERROR: data file not found: {csv_path}")
+        print("Run scripts/research/fetch_btc_history.py first.")
+        sys.exit(1)
+
+    bars = load_csv(csv_path)
+    n = len(bars["close"])
+    days = (bars["ts"][-1] - bars["ts"][0]) / 86400
+    print(f"Loaded {n} bars ({days:.1f} days)")
+
+    # Pre-compute indicators once per unique (ema_fast, ema_slow, rsi_period)
+    # then reuse across the parameter grid.
+    indicator_cache: dict[tuple, dict] = {}
+    print("Pre-computing indicators...")
+    for ef, es in [(9, 50), (9, 100), (21, 50), (21, 100)]:
+        for rsip in [14]:
+            key = (ef, es, rsip)
+            indicator_cache[key] = {
+                "ema_fast": ema(bars["close"], ef),
+                "ema_slow": ema(bars["close"], es),
+                "rsi":      wilder_rsi(bars["close"], rsip),
+            }
+    print(f"  cached {len(indicator_cache)} indicator sets")
+
+    combos = list(grid())
+    print(f"Running sweep: {len(combos):,} combos...")
+
+    results: list[Result] = []
+    t0 = time.time()
+    last_print = t0
+    for idx, p in enumerate(combos):
+        ind = indicator_cache[(p["ema_fast"], p["ema_slow"], p["rsi_period"])]
+        buy, sell = build_signals(
+            bars["close"], ind["rsi"], ind["ema_slow"],
+            p["rsi_buy"], p["rsi_sell"], p["require_trend"],
+        )
+        # warmup = max(ema_slow, rsi_period) so indicators are stable
+        warmup = max(p["ema_slow"], p["rsi_period"]) + 1
+        rets, eq_curve, wins, mdd = simulate(
+            bars, buy, sell,
+            start_equity=args.start_equity,
+            risk_pct=p["risk_pct"],
+            stop_loss_pct=p["stop_loss_pct"],
+            rr=p["rr"],
+            trail_activate_pct=p["trail_activate_pct"],
+            trail_pct=p["trail_pct"],
+            breakeven_activate_pct=p["breakeven_activate_pct"],
+            min_profit_hold_pct=p["min_profit_hold_pct"],
+            fee_pct=args.fee_pct,
+            micro_account_threshold=200.0,
+            confidence_floor=0.6,
+            asset_multiplier=0.80,
+            min_notional=5.0,
+            warmup=warmup,
+        )
+        n_trades = len(rets)
+        n_wins = sum(wins)
+        wr = (n_wins / n_trades) if n_trades else 0.0
+        final_eq = eq_curve[-1]
+        net_ret = (final_eq / args.start_equity - 1.0) * 100.0
+        if rets:
+            wins_arr = np.array([r for r in rets if r > 0])
+            losses_arr = np.array([r for r in rets if r <= 0])
+            gw = wins_arr.sum() if wins_arr.size else 0.0
+            gl = -losses_arr.sum() if losses_arr.size else 0.0
+            pf = (gw / gl) if gl > 0 else (float("inf") if gw > 0 else 0.0)
+            aw = wins_arr.mean() if wins_arr.size else 0.0
+            al = losses_arr.mean() if losses_arr.size else 0.0
+            mu = float(np.mean(rets))
+            sd = float(np.std(rets)) or 1e-9
+            sharpe_like = (mu / sd) * math.sqrt(max(n_trades, 1))
+        else:
+            pf = 0.0; aw = 0.0; al = 0.0; sharpe_like = 0.0
+
+        results.append(Result(
+            risk_pct=p["risk_pct"], stop_loss_pct=p["stop_loss_pct"], rr=p["rr"],
+            rsi_buy=p["rsi_buy"], rsi_sell=p["rsi_sell"],
+            ema_fast=p["ema_fast"], ema_slow=p["ema_slow"],
+            rsi_period=p["rsi_period"],
+            trail_activate_pct=p["trail_activate_pct"], trail_pct=p["trail_pct"],
+            breakeven_activate_pct=p["breakeven_activate_pct"],
+            require_trend=p["require_trend"],
+            min_profit_hold_pct=p["min_profit_hold_pct"],
+            trades=n_trades, wins=n_wins, win_rate=wr,
+            final_equity=final_eq, net_return_pct=net_ret,
+            max_drawdown_pct=mdd, profit_factor=pf if math.isfinite(pf) else 999.0,
+            avg_win_pct=aw, avg_loss_pct=al, sharpe_like=sharpe_like,
+            days=days,
+        ))
+
+        if time.time() - last_print > 3:
+            done = idx + 1
+            elapsed = time.time() - t0
+            rate = done / elapsed
+            eta = (len(combos) - done) / rate
+            print(f"  {done:,}/{len(combos):,}  ({rate:.0f}/s)  ETA {eta:.0f}s")
+            last_print = time.time()
+
+    elapsed = time.time() - t0
+    print(f"Done. {len(results):,} combos in {elapsed:.1f}s ({len(results)/elapsed:.0f}/s)")
+
+    # ---- save raw results ----
+    out_json = Path("docs/research/btc_compounding_sweep_results.json")
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    def _scrub(v):
+        # numpy scalars -> python scalars
+        if isinstance(v, np.generic):
+            v = v.item()
+        if isinstance(v, float):
+            if math.isnan(v) or math.isinf(v):
+                return None
+        return v
+    payload = {
+        "data_file": str(csv_path),
+        "bars": n,
+        "days": days,
+        "start_equity": args.start_equity,
+        "fee_pct": args.fee_pct,
+        "n_combos": len(results),
+        "results": [{k: _scrub(v) for k, v in asdict(r).items()} for r in results],
+    }
+    with out_json.open("w") as f:
+        json.dump(payload, f)
+    print(f"  raw → {out_json}")
+
+    # ---- rank + report ----
+    # require minimum trade count to avoid lucky 1-trade flukes
+    min_trades = 8
+    qualified = [r for r in results if r.trades >= min_trades]
+    print(f"  qualified (>={min_trades} trades): {len(qualified)}/{len(results)}")
+
+    # composite score: equity_return - 0.5 * max_drawdown
+    # (penalises drawdown without throwing away returns)
+    qualified.sort(key=lambda r: r.net_return_pct - 0.5 * r.max_drawdown_pct, reverse=True)
+    top = qualified[: args.top]
+    write_results_md(top, results, qualified, days, args)
+
+
+def write_results_md(top, all_results, qualified, days, args) -> None:
+    out_md = Path("docs/research/TESTING_RESULTS.md")
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+
+    n_profit = sum(1 for r in qualified if r.net_return_pct > 0)
+    pct_profit = (n_profit / len(qualified) * 100) if qualified else 0.0
+
+    lines = []
+    lines.append("# BTC/USDT Compounding Parameter Sweep — Results")
+    lines.append("")
+    lines.append(f"- **Data**: `{args.data}` ({days:.1f} days of real KuCoin 1h candles)")
+    lines.append(f"- **Start equity**: ${args.start_equity:.2f}")
+    lines.append(f"- **Fee per side**: {args.fee_pct*100:.2f}%")
+    lines.append(f"- **Total combos tested**: {len(all_results):,}")
+    lines.append(f"- **Qualified (≥8 trades)**: {len(qualified):,}")
+    lines.append(f"- **Profitable (net > 0)**: {n_profit:,}  ({pct_profit:.1f}%)")
+    lines.append("")
+    lines.append("## Ranking method")
+    lines.append("`score = net_return_pct - 0.5 * max_drawdown_pct`")
+    lines.append("")
+    lines.append("Filtered to combos with ≥8 trades to avoid lucky 1-trade flukes.")
+    lines.append("")
+    lines.append(f"## Top {len(top)} configurations")
+    lines.append("")
+    lines.append(
+        "| # | Risk% | SL% | R:R | RSI buy/sell | EMA f/s | Trail act/% | BE act% | Trend? | Hold% "
+        "| Trades | WR | Net% | MaxDD% | PF | Score |"
+    )
+    lines.append(
+        "|---|------:|----:|----:|--------------|---------|-------------|--------:|--------|------:"
+        "|-------:|---:|-----:|-------:|---:|------:|"
+    )
+    for i, r in enumerate(top, 1):
+        score = r.net_return_pct - 0.5 * r.max_drawdown_pct
+        lines.append(
+            f"| {i} | {r.risk_pct*100:.1f} | {r.stop_loss_pct:.1f} | {r.rr:.1f} "
+            f"| {r.rsi_buy:.0f}/{r.rsi_sell:.0f} "
+            f"| {r.ema_fast}/{r.ema_slow} "
+            f"| {r.trail_activate_pct:.1f}/{r.trail_pct:.1f} "
+            f"| {r.breakeven_activate_pct:.1f} "
+            f"| {'Y' if r.require_trend else 'N'} "
+            f"| {r.min_profit_hold_pct:.1f} "
+            f"| {r.trades} | {r.win_rate*100:.0f}% "
+            f"| {r.net_return_pct:+.1f} | {r.max_drawdown_pct:.1f} "
+            f"| {r.profit_factor:.2f} | {score:+.1f} |"
+        )
+
+    # Single best — full detail
+    if top:
+        b = top[0]
+        lines.append("")
+        lines.append("## #1 configuration — recommended starting params")
+        lines.append("")
+        lines.append("```")
+        lines.append(f"RISK_PER_TRADE             = {b.risk_pct}")
+        lines.append(f"DEFAULT_STOP_LOSS_PCT      = {b.stop_loss_pct/100}")
+        lines.append(f"MIN_RISK_REWARD_RATIO      = {b.rr}")
+        lines.append(f"RSI_BUY_THRESHOLD          = {b.rsi_buy}")
+        lines.append(f"RSI_SELL_THRESHOLD         = {b.rsi_sell}")
+        lines.append(f"EMA_FAST                   = {b.ema_fast}")
+        lines.append(f"EMA_SLOW                   = {b.ema_slow}")
+        lines.append(f"RSI_PERIOD                 = {b.rsi_period}")
+        lines.append(f"TRAILING_ACTIVATION_PCT    = {b.trail_activate_pct}")
+        lines.append(f"TRAILING_PCT               = {b.trail_pct}")
+        lines.append(f"BREAKEVEN_ACTIVATION_PCT   = {b.breakeven_activate_pct}")
+        lines.append(f"REQUIRE_TREND_FILTER       = {b.require_trend}")
+        lines.append(f"MIN_PROFIT_TO_HOLD_PCT     = {b.min_profit_hold_pct}")
+        lines.append("")
+        lines.append(f"# Backtest:")
+        lines.append(f"#   trades       = {b.trades}")
+        lines.append(f"#   win rate     = {b.win_rate*100:.1f}%")
+        lines.append(f"#   net return   = {b.net_return_pct:+.2f}%")
+        lines.append(f"#   max drawdown = {b.max_drawdown_pct:.2f}%")
+        lines.append(f"#   profit factor= {b.profit_factor:.2f}")
+        lines.append(f"#   avg win      = {b.avg_win_pct:+.2f}%")
+        lines.append(f"#   avg loss     = {b.avg_loss_pct:+.2f}%")
+        lines.append(f"#   final equity = ${b.final_equity:.2f} (from ${args.start_equity:.2f})")
+        lines.append("```")
+
+    # Marginal-effect summary: which parameter values are most-represented in top decile
+    if qualified:
+        lines.append("")
+        lines.append("## Parameter influence (top 10% of qualified)")
+        lines.append("")
+        top_decile_n = max(1, len(qualified) // 10)
+        top_decile = qualified[:top_decile_n]
+        from collections import Counter
+        def freq(attr):
+            c = Counter(getattr(r, attr) for r in top_decile)
+            tot = sum(c.values())
+            return ", ".join(f"`{k}`: {v/tot*100:.0f}%" for k, v in sorted(c.items(), key=lambda x: -x[1]))
+        for attr, label in [
+            ("risk_pct", "Risk per trade"),
+            ("stop_loss_pct", "Stop loss %"),
+            ("rr", "R:R"),
+            ("rsi_buy", "RSI buy"),
+            ("rsi_sell", "RSI sell"),
+            ("ema_fast", "EMA fast"),
+            ("ema_slow", "EMA slow"),
+            ("trail_activate_pct", "Trail activate %"),
+            ("require_trend", "Trend filter"),
+        ]:
+            lines.append(f"- **{label}**: {freq(attr)}")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+    lines.append("_Generated by `scripts/research/run_btc_compounding_sweep.py`._")
+    lines.append("_Strategy: RSI-oversold long entry with optional EMA trend filter; exit stack: SL → breakeven → trailing → R:R TP → SELL signal (gated by MIN_PROFIT_TO_HOLD_PCT)._")
+    lines.append("_Spot-long-only, single position, 0.1% taker fee each side, compounding equity._")
+    lines.append("")
+
+    out_md.write_text("\n".join(lines))
+    print(f"  report → {out_md}")
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data", default="data/btc_usdt_1h.csv")
+    ap.add_argument("--start-equity", type=float, default=110.0)
+    ap.add_argument("--fee-pct", type=float, default=0.001)  # 0.1% taker
+    ap.add_argument("--top", type=int, default=30)
+    args = ap.parse_args()
+    run(args)
+
+
+if __name__ == "__main__":
+    main()
+Open
+17,280 combos / 19.4s / 9,720 qualified. Let's see the results:
+
+This is an honest, brutal result that I want to be direct with you about:
+
+🚨 0 out of 9,720 qualified configs were profitable on real BTC data
+Why this matters: the data window happens to be Feb→Jun 2026, BTC dropped -14.37%. The simplified RSI+EMA mean-reversion strategy in this sweep has no edge in that regime on the 1h timeframe at 0.1% taker fees. Best config lost $1.19 on $110 (50% WR, PF 0.64, avg loss > avg win).
+
+This contradicts the "85 trades, 57.6% WR, +$798" claim in your journal — which means one of three things:
+
+That backtest was on a different regime (bullish 2024 data probably), so the bot has edge in trends/sideways but bleeds in downtrends — that's the realistic story for any spot-long-only strategy.
+My sweep's signal generator is simpler than the real bot's — I used just RSI cross + EMA filter. The live bot has multi-factor confluence (volume, ATR, etc.). The sweep may underestimate the real signal quality.
+Fees + a downtrend kill simple mean-reversion even at the bot's true skill level.
+Let me run two quick follow-ups to figure out which it is — re-test with (a) zero fees to isolate signal quality, and (b) a longer history that includes a bull leg:
+
+
+Ran commands
+2
+A full year of BTC: $105k → $66k = -37%, but it ranged $62k → $126k (so plenty of swings to mean-revert). Let me run the sweep on this and also with zero fees as a sanity check on signal quality:
+
+Over a full year of brutal BTC (-37%): only 66 / 10,800 (0.6%) profitable. Top config: +1.0% net return. Profit Factor 1.20 max. 18 trades over 365 days — that's a trade every 20 days for a 1% gain.
+
+Let me also test with zero fees to isolate whether the underlying signal even has edge, and try the 4h timeframe (less noise, less fee drag):
+
+Now the picture is clear:
+
+Test	Profitable / Qualified	Best return	Best PF
+1h, 120d, 0.1% fee	0 / 9,720 (0%)	-1.08%	0.64
+1h, 365d, 0.1% fee	66 / 10,800 (0.6%)	+1.0%	1.20
+1h, 365d, 0% fee	290 / 10,800 (2.7%)	—	—
+4h, 365d, 0.1% fee	0 / 9,720 (0%)	-0.1%	0.98
+Let me regenerate the final 1y/1h/0.1% report as the canonical one, and then I'll be brutally honest about what this means:
+
+
+Ran commands
+3
+Everything's in place. Here's the full, honest story.
+
+🎯 Sweep results — what real BTC data actually says
+Test	Profitable / Qualified	Best return	Best PF	Headline
+1h, 365d, 0.1% fee	66 / 10,800 (0.6%)	+1.04%	1.20	barely positive, signal effectively destroyed by fees
+1h, 365d, 0% fee	290 / 10,800 (2.7%)	—	—	even with zero fees, 97% of configs lose
+1h, 120d (recent), 0.1% fee	0 / 9,720 (0%)	-1.08%	0.64	recent BTC down -14% — nothing works
+4h, 365d, 0.1% fee	0 / 9,720 (0%)	-0.1%	0.98	wider timeframe doesn't save it
+The single best configuration over a full year (yearly BTC = -37%) achieved:
+
+18 trades, 44% WR, +1.04% net return ($110 → $111.14)
+PF 1.20, max DD 2.44%
+🔍 What this means — being direct
+You asked for real data proving profitability before live cutover. The data is in. The honest read:
+
+The "+$798, 57.6% WR, Sharpe 20.51" backtest in your journal looks like it was generated against a benign regime, not validated out-of-sample. That number doesn't survive contact with a real bear leg.
+
+At 0.1% taker fees, BTC mean-reversion on 1h has no edge in 2025-2026. Best PF is 1.20 over 18 trades — well inside the range of pure noise (you'd need ~50+ trades and PF >1.5 to argue real edge).
+
+Spot-long-only is structurally disadvantaged in a 37%/yr downtrend. It can only profit on local pullbacks — which is exactly what the strategy is doing for +1% / year. That's a savings account return with risk.
+
+My sweep is intentionally a simplified signal model (RSI cross + EMA filter). The live bot has more confluence, so its real number may be 2-3x better. But "2-3x better than +1%" is +2-3%/year — still not worth running a bot, paying fees, and absorbing operational risk for.
+
+The "0 of 9,720 profitable on recent 4-month data" is the most important number on this page. That's the regime your $110 would actually trade through if you cut over today.
+
+📋 Recommended action
+I want to put a checkbox-style decision in front of you because the right next move depends on your appetite:
+
+Summary
+After seeing real BTC data give 0.6% profitable configs over a full year and 0% over the last 4 months: what's the call?
+Strategy needs a rebuild before live
+Good call — that's the right read of the data. Before I dive into a rebuild, I want to lock down what "rebuild" means concretely so we don't ship a second strategy with the same blind spots.
+
+The lessons from the sweep that should constrain the new design:
+
+Spot-long-only + RSI mean-reversion + 0.1% fees + 1h BTC = no edge in 2025-26. The strategy family was wrong, not just the parameters.
+Edge has to be ≥0.4%/trade net of fees or you're paying KuCoin to be busy.
+18 trades/year is too few to know anything — sample size matters as much as edge.
+Validation requires out-of-sample testing (train on year 1, test on year 2) — single-window backtests are how you get +$798 phantom returns.
+Here are the strategy families that have some historical evidence of edge at retail scale on crypto spot, with their honest trade-offs:
+
+Family	What it is	Why it might work	Honest catch
+A. Trend-following / breakout	Buy 20-day high, ride trend, trail stop	BTC has fat-tailed up moves; long-only-friendly	Whipsawed in chop; needs patience
+B. Momentum rotation (top-N alts)	Hold top-3 strongest USDT pairs by 30d return, rebalance weekly	Empirically the strongest crypto retail edge in academic studies	Needs ≥$500 for diversification; alt liquidity risk
+C. Funding-rate carry (perp short + spot long)	Delta-neutral, collect funding	Mechanical, not directional, well-documented	Needs ≥$1.5k, requires futures access
+D. Volatility breakout (Larry Williams / Bollinger expansion)	Enter on N-bar range breakout with vol filter	Works in trending regimes	Pure long-only loses the short-leg edge
+E. Buy-and-hold BTC with rebalancing	Just hold, take profits at +20%/+50%/+100%	Easiest, lowest fees, captures long-term drift	"Doing nothing" is hard to justify as a bot
+Which strategy family should we test next on real data? (I'll run the same rigorous sweep against it.)
+1
+/
+2
+
+
+A: Trend-following / breakout
+Long-only-friendly, works in BTC's up moves. I'll build a Donchian/breakout sweep on the same real data, with proper out-of-sample (train H1 2025, test H2 2025+).
+
+B: Momentum rotation
+Strongest empirical edge. Requires multi-asset. I'd need to fetch ETH/SOL/AVAX/etc history and build the rotation engine. Worth deferring until equity > $500.
+
+C: Funding-rate carry
+Already discussed: requires $1.5k+ and futures access. Skip until then.
+
+D: Volatility breakout
+Similar build effort to A. Slightly different signal logic.
+
+E: Buy-and-hold with rebalancing
+Honest answer: at $110, this likely beats every bot. I can build a backtest showing the bar to beat.
+Write your own
+Submit

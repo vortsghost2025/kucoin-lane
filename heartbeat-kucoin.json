@@ -1,0 +1,12 @@
+{
+  "heartbeat": {
+    "lane": "kucoin",
+    "status": "in_progress",
+    "timestamp": "2026-06-06T17:56:36Z"
+  },
+  "body": "{\n  \"agent_mode\": \"trading\",\n  \"identity_status\": \"ratified\",\n  \"uptime_seconds\": 63503,\n  \"last_cycle\": \"2026-06-06T17:56:36Z\",\n  \"architecture\": \"docker-compose\",\n  \"docker_health\": \"healthy\"\n}",
+  "meta": {
+    "source": "kucoin-heartbeat-bridge",
+    "architecture": "docker-compose"
+  }
+}

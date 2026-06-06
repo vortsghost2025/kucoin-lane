@@ -264,6 +264,203 @@ class Supertrend(Strategy):
         }
 
 
+class RsiRegime(Strategy):
+    """
+    RSI + Regime hybrid strategy.
+
+    Uses RSI for mean-reversion signals in ranging markets,
+    and trend-following (momentum confirmation) in trending markets.
+    Integrates ADX regime classification to switch between modes.
+
+    BUY:  RSI < oversold in RANGING, or RSI recovering + uptrend in TRENDING_UP
+    SELL: RSI > overbought in RANGING, or RSI declining + downtrend in TRENDING_DOWN
+    HOLD: No clear signal
+    """
+
+    def __init__(
+        self,
+        rsi_period: int = 14,
+        oversold: float = 30.0,
+        overbought: float = 70.0,
+        adx_period: int = 14,
+        adx_trend_threshold: float = 25.0,
+    ):
+        self.rsi_period = rsi_period
+        self.oversold = oversold
+        self.overbought = overbought
+        self.adx_period = adx_period
+        self.adx_trend_threshold = adx_trend_threshold
+
+    def generate_signal(self, df: pd.DataFrame) -> Dict[str, Any]:
+        min_bars = max(self.rsi_period, self.adx_period) + 1
+        if len(df) < min_bars:
+            return {
+                "action": "HOLD",
+                "confidence": 0.1,
+                "reasoning": f"Insufficient data: need {min_bars} bars, got {len(df)}",
+                "indicators": {},
+            }
+
+        close = df["close"].values
+        high = df["high"].values
+        low = df["low"].values
+
+        rsi = self._compute_rsi(close, self.rsi_period)
+        adx, adx_pos, adx_neg = self._compute_adx(high, low, close, self.adx_period)
+
+        curr_rsi = rsi[-1]
+        curr_adx = adx[-1]
+        curr_adx_pos = adx_pos[-1]
+        curr_adx_neg = adx_neg[-1]
+
+        if np.isnan(curr_rsi) or np.isnan(curr_adx):
+            return {
+                "action": "HOLD",
+                "confidence": 0.1,
+                "reasoning": "RSI or ADX calculation resulted in NaN",
+                "indicators": {"rsi": float(curr_rsi) if not np.isnan(curr_rsi) else None},
+            }
+
+        is_trending = curr_adx > self.adx_trend_threshold
+        direction = "NEUTRAL"
+        if curr_adx_pos > curr_adx_neg * 1.2:
+            direction = "BULLISH"
+        elif curr_adx_neg > curr_adx_pos * 1.2:
+            direction = "BEARISH"
+
+        if not is_trending:
+            if curr_rsi < self.oversold:
+                action = "BUY"
+                confidence = min(0.9, 0.5 + (self.oversold - curr_rsi) / self.oversold * 0.4)
+                reasoning = (
+                    f"RANGING: RSI oversold ({curr_rsi:.1f} < {self.oversold}) "
+                    f"ADX={curr_adx:.1f}"
+                )
+            elif curr_rsi > self.overbought:
+                action = "SELL"
+                confidence = min(0.9, 0.5 + (curr_rsi - self.overbought) / (100 - self.overbought) * 0.4)
+                reasoning = (
+                    f"RANGING: RSI overbought ({curr_rsi:.1f} > {self.overbought}) "
+                    f"ADX={curr_adx:.1f}"
+                )
+            else:
+                action = "HOLD"
+                confidence = 0.3
+                reasoning = (
+                    f"RANGING: RSI neutral ({curr_rsi:.1f}) ADX={curr_adx:.1f}"
+                )
+        else:
+            if direction == "BULLISH" and curr_rsi > 40 and curr_rsi < 70:
+                action = "BUY"
+                confidence = min(0.9, 0.5 + (curr_adx / 50) * 0.4)
+                reasoning = (
+                    f"TRENDING_UP: RSI momentum ({curr_rsi:.1f}) "
+                    f"ADX={curr_adx:.1f} DI+={curr_adx_pos:.1f}"
+                )
+            elif direction == "BEARISH" and curr_rsi < 60 and curr_rsi > 30:
+                action = "SELL"
+                confidence = min(0.9, 0.5 + (curr_adx / 50) * 0.4)
+                reasoning = (
+                    f"TRENDING_DOWN: RSI momentum ({curr_rsi:.1f}) "
+                    f"ADX={curr_adx:.1f} DI-={curr_adx_neg:.1f}"
+                )
+            else:
+                action = "HOLD"
+                confidence = 0.3
+                reasoning = (
+                    f"TRENDING ({direction}): RSI={curr_rsi:.1f} no clear entry "
+                    f"ADX={curr_adx:.1f}"
+                )
+
+        return {
+            "action": action,
+            "confidence": float(confidence),
+            "reasoning": reasoning,
+            "indicators": {
+                "rsi": float(curr_rsi),
+                "adx": float(curr_adx),
+                "adx_pos": float(curr_adx_pos),
+                "adx_neg": float(curr_adx_neg),
+                "regime": "TRENDING" if is_trending else "RANGING",
+                "direction": direction,
+            },
+        }
+
+    @staticmethod
+    def _compute_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+        delta = np.diff(close, prepend=close[0])
+        gain = np.where(delta > 0, delta, 0.0)
+        loss = np.where(delta < 0, -delta, 0.0)
+        avg_gain = np.empty_like(close)
+        avg_loss = np.empty_like(close)
+        avg_gain[:period] = np.nan
+        avg_loss[:period] = np.nan
+        avg_gain[period] = np.mean(gain[1:period + 1])
+        avg_loss[period] = np.mean(loss[1:period + 1])
+        k = 2.0 / (period + 1)
+        for i in range(period + 1, len(close)):
+            avg_gain[i] = gain[i] * k + avg_gain[i - 1] * (1 - k)
+            avg_loss[i] = loss[i] * k + avg_loss[i - 1] * (1 - k)
+        rs = avg_gain / np.where(avg_loss == 0, 1e-10, avg_loss)
+        rsi = 100.0 - (100.0 / (1.0 + rs))
+        rsi[:period] = np.nan
+        return rsi
+
+    @staticmethod
+    def _compute_adx(
+        high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14
+    ) -> tuple:
+        prev_high = np.roll(high, 1)
+        prev_low = np.roll(low, 1)
+        prev_close = np.roll(close, 1)
+        prev_high[0] = high[0]
+        prev_low[0] = low[0]
+        prev_close[0] = close[0]
+
+        plus_dm = np.maximum(high - prev_high, 0.0)
+        minus_dm = np.maximum(prev_low - low, 0.0)
+        plus_dm = np.where((high - prev_high) > (prev_low - low), plus_dm, 0.0)
+        minus_dm = np.where((prev_low - low) > (high - prev_high), minus_dm, 0.0)
+
+        prev_close_safe = np.where(prev_close == 0, 1e-10, prev_close)
+        tr = np.maximum(
+            high - low,
+            np.maximum(np.abs(high - prev_close), np.abs(low - prev_close)),
+        )
+        atr = np.empty_like(tr)
+        atr[:period] = np.nan
+        atr[period - 1] = np.mean(tr[1:period + 1])
+        k = 2.0 / (period + 1)
+        for i in range(period, len(tr)):
+            atr[i] = tr[i] * k + atr[i - 1] * (1 - k)
+
+        smooth_plus_dm = np.empty_like(plus_dm)
+        smooth_minus_dm = np.empty_like(minus_dm)
+        smooth_plus_dm[:period] = np.nan
+        smooth_minus_dm[:period] = np.nan
+        smooth_plus_dm[period - 1] = np.sum(plus_dm[1:period + 1])
+        smooth_minus_dm[period - 1] = np.sum(minus_dm[1:period + 1])
+        for i in range(period, len(close)):
+            smooth_plus_dm[i] = plus_dm[i] * k + smooth_plus_dm[i - 1] * (1 - k)
+            smooth_minus_dm[i] = minus_dm[i] * k + smooth_minus_dm[i - 1] * (1 - k)
+
+        atr_safe = np.where(atr == 0, 1e-10, atr)
+        di_pos = (smooth_plus_dm / atr_safe) * 100.0
+        di_neg = (smooth_minus_dm / atr_safe) * 100.0
+
+        dx = np.abs(di_pos - di_neg) / np.where(
+            (di_pos + di_neg) == 0, 1e-10, (di_pos + di_neg)
+        ) * 100.0
+        adx = np.empty_like(dx)
+        adx[:period * 2 - 1] = np.nan
+        if len(dx) > period * 2 - 1:
+            adx[period * 2 - 1] = np.mean(dx[period:period * 2])
+            for i in range(period * 2, len(dx)):
+                adx[i] = dx[i] * k + adx[i - 1] * (1 - k)
+
+        return adx, di_pos, di_neg
+
+
 class StrategyFactory:
     """Factory for creating strategy instances."""
     
@@ -292,7 +489,6 @@ class StrategyFactory:
         elif strategy_name == "supertrend":
             return Supertrend(**params)
         elif strategy_name == "rsi_regime":
-            # RSI regime strategy is handled elsewhere in the bot
-            raise NotImplementedError("RSI regime strategy is not implemented in this module")
+            return RsiRegime(**params)
         else:
             raise ValueError(f"Unknown strategy: {strategy_name}. Available: vol_breakout, supertrend, rsi_regime")

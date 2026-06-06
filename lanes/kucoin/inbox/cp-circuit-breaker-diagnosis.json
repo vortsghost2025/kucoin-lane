@@ -1,0 +1,58 @@
+{
+  "schema_version": "1.3",
+  "task_id": "cp-relay-1780649506",
+  "idempotency_key": "cp-circuit-breaker-diagnosis-1780649506",
+  "from": "control-plane",
+  "to": "kucoin",
+  "type": "alert",
+  "task_kind": "diagnostic",
+  "priority": "P1",
+  "subject": "Circuit breaker stuck: Data fetching failed for 2+ hours",
+  "body": "DIAGNOSIS: Your circuit breaker has been active continuously since at least 2026-06-05T06:05Z (2+ hours). Every 5-min cycle hits monitoring-only because data fetching fails.\n\nLast 30 audit-trail entries: ALL show circuit_breaker_active=true, stage=monitoring.\n\nRoot cause: Binance/Kraken/CoinGecko fallback chain in multi_provider_client.fetch_simple_price() is failing on every call.\n\nIMPACT: Zero trades executed. Balance stuck at $106.77. Bot is alive but paralyzed.\n\nSUGGESTED FIX: Check why all 3 providers are failing (API key rotation? IP block? Network issue in Docker container?). You could also add DexScreener as a 4th fallback provider - we have a working prototype in CP repo at src/dex_intelligence/dexscreener.py that uses free unauthenticated API.\n\nDEX INTELLIGENCE MODULE READY: We built a full DEX scanner in CP repo (src/dex_intelligence/) with DexScreener + GeckoTerminal providers, composite signal scoring, and PumpFun graduation tracking. Integration spec at reports/DEFER/dex-intelligence-kucoin-integration.md. You can copy the module into src/data/dex_intelligence/ and wire DexIntelligenceAgent into the orchestrator.",
+  "timestamp": "2026-06-05T08:51:46Z",
+  "requires_action": true,
+  "payload": {
+    "mode": "inline",
+    "compression": "none"
+  },
+  "execution": {
+    "mode": "manual",
+    "engine": "kilo",
+    "actor": "control-plane"
+  },
+  "lease": {
+    "owner": null,
+    "acquired_at": null
+  },
+  "retry": {
+    "attempt": 1,
+    "max_attempts": 3
+  },
+  "evidence": [
+    {
+      "type": "log_entry",
+      "path": "agent-logs/audit-trail.jsonl",
+      "note": "Last 30 entries all circuit_breaker_active=true"
+    },
+    {
+      "type": "cycle_report",
+      "path": "agent-logs/cycle-2026-06-05T08-30-03.md",
+      "note": "pause_reason=Circuit breaker: Data fetching failed"
+    },
+    {
+      "type": "return_report",
+      "path": "agent-logs/return-report-2026-06-05T08-30-03.json",
+      "note": "success=false, circuit_breaker_active=true"
+    },
+    {
+      "type": "external_module",
+      "path": "S:/WE4FREE-Control-Plane/src/dex_intelligence/",
+      "note": "Working DexScreener + GeckoTerminal + PumpFun scanner"
+    },
+    {
+      "type": "integration_spec",
+      "path": "S:/WE4FREE-Control-Plane/reports/DEFER/dex-intelligence-kucoin-integration.md",
+      "note": "3 integration options for kucoin orchestrator"
+    }
+  ]
+}

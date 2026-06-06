@@ -131,20 +131,24 @@ class IntelligenceOrchestrator(BaseAgent):
         self.whale_watch = WhaleWatch() if enable_whale else None
         
         # Strategy signal generator (VolBreakout, Supertrend, or legacy RSI/regime)
-        strategy_name = config.get("strategy") or os.getenv("STRATEGY", "rsi_regime").lower()
-        if strategy_name in ("vol_breakout", "supertrend"):
+        strategy_name = config.get("strategy") or os.getenv("STRATEGY", "vol_breakout").lower()
+        if strategy_name in ("vol_breakout", "supertrend", "rsi_regime"):
             strategy_params = config.get("strategy_params", {})
             try:
                 self.strategy = StrategyFactory.create(strategy_name, strategy_params)
                 self.strategy_name = strategy_name
                 self.logger.info(f"Strategy engine: {strategy_name} (params: {strategy_params})")
             except Exception as e:
-                self.logger.warning(f"Strategy '{strategy_name}' init failed: {e}, falling back to rsi_regime")
-                self.strategy = None
-                self.strategy_name = "rsi_regime"
+                self.logger.warning(f"Strategy '{strategy_name}' init failed: {e}, falling back to vol_breakout")
+                try:
+                    self.strategy = StrategyFactory.create("vol_breakout", {})
+                    self.strategy_name = "vol_breakout"
+                except Exception:
+                    self.strategy = None
+                    self.strategy_name = "none"
         else:
             self.strategy = None
-            self.strategy_name = "rsi_regime"
+            self.strategy_name = "none"
 
         self.enabled_modules = {
             "regime": enable_regime,

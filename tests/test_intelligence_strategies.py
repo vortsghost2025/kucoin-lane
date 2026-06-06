@@ -5,6 +5,7 @@ from src.intelligence.strategies import (
     compute_atr,
     VolBreakout,
     Supertrend,
+    RsiRegime,
     StrategyFactory,
     Strategy,
 )
@@ -230,10 +231,10 @@ class TestStrategyFactory:
         strategy = StrategyFactory.create("supertrend")
         assert isinstance(strategy, Supertrend)
 
-    def test_create_rsi_regime_raises(self):
-        """Factory should raise NotImplementedError for rsi_regime."""
-        with pytest.raises(NotImplementedError):
-            StrategyFactory.create("rsi_regime")
+    def test_create_rsi_regime(self):
+        """Factory should create RsiRegime instance."""
+        rsi = StrategyFactory.create("rsi_regime")
+        assert isinstance(rsi, RsiRegime)
 
     def test_create_unknown_raises(self):
         """Factory should raise ValueError for unknown strategy."""
@@ -246,6 +247,8 @@ class TestStrategyFactory:
         assert isinstance(vb, VolBreakout)
         st = StrategyFactory.create("SuperTrend")
         assert isinstance(st, Supertrend)
+        rsi = StrategyFactory.create("RSI_REGIME")
+        assert isinstance(rsi, RsiRegime)
 
     def test_with_custom_params(self):
         """Factory should pass custom params to strategy constructor."""
@@ -255,6 +258,58 @@ class TestStrategyFactory:
         assert isinstance(strategy, VolBreakout)
         assert strategy.atr_period == 10
         assert strategy.atr_mult_entry == 1.5
+
+
+class TestRsiRegime:
+    def _make_df(self, closes, highs=None, lows=None, n=50):
+        if highs is None:
+            highs = [c * 1.02 for c in closes]
+        if lows is None:
+            lows = [c * 0.98 for c in closes]
+        n = len(closes)
+        return pd.DataFrame({
+            "open": closes,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": [1000] * n,
+        })
+
+    def test_insufficient_data_returns_hold(self):
+        strategy = RsiRegime()
+        df = self._make_df([100, 101, 102])
+        result = strategy.generate_signal(df)
+        assert result["action"] == "HOLD"
+        assert result["confidence"] <= 0.2
+
+    def test_ranging_oversold_returns_buy(self):
+        np.random.seed(42)
+        base = [100.0] * 30
+        decline = [100.0 - i * 0.5 for i in range(25)]
+        closes = base + decline
+        df = self._make_df(closes)
+        strategy = RsiRegime(oversold=35, overbought=65)
+        result = strategy.generate_signal(df)
+        assert result["action"] in ("BUY", "HOLD", "SELL")
+        assert "rsi" in result["indicators"]
+        assert "adx" in result["indicators"]
+
+    def test_factory_creates_rsi_regime(self):
+        rsi = StrategyFactory.create("rsi_regime", {"rsi_period": 21})
+        assert isinstance(rsi, RsiRegime)
+        assert rsi.rsi_period == 21
+
+    def test_signal_structure(self):
+        np.random.seed(99)
+        closes = [100 + np.random.randn() * 2 for _ in range(60)]
+        df = self._make_df(closes)
+        strategy = RsiRegime()
+        result = strategy.generate_signal(df)
+        assert result["action"] in ("BUY", "SELL", "HOLD")
+        assert 0.0 <= result["confidence"] <= 1.0
+        assert isinstance(result["reasoning"], str)
+        assert "regime" in result["indicators"]
+        assert "direction" in result["indicators"]
 
 
 class TestOrchestratorIntegration:
@@ -289,7 +344,7 @@ class TestOrchestratorIntegration:
         assert orch.strategy_name == "supertrend"
 
     def test_orchestrator_fallback_on_bad_strategy(self):
-        """Orchestrator should fall back to rsi_regime on bad strategy name."""
+        """Orchestrator should fall back to vol_breakout on bad strategy name."""
         from src.intelligence.orchestrator import IntelligenceOrchestrator
 
         config = {
@@ -301,19 +356,34 @@ class TestOrchestratorIntegration:
         }
         orch = IntelligenceOrchestrator(config)
         assert orch.strategy is None
+        assert orch.strategy_name == "none"
+
+    def test_orchestrator_with_rsi_regime(self):
+        """Orchestrator should initialize with rsi_regime strategy."""
+        from src.intelligence.orchestrator import IntelligenceOrchestrator
+
+        config = {
+            "strategy": "rsi_regime",
+            "enable_regime": False,
+            "enable_lead_lag": False,
+            "enable_whale": False,
+            "account_balance": 110,
+        }
+        orch = IntelligenceOrchestrator(config)
+        assert orch.strategy is not None
         assert orch.strategy_name == "rsi_regime"
 
-def test_orchestrator_default_no_strategy(monkeypatch):
-    """Orchestrator without strategy config should default to rsi_regime."""
-    monkeypatch.delenv("STRATEGY", raising=False)
-    from src.intelligence.orchestrator import IntelligenceOrchestrator
+    def test_orchestrator_default_no_strategy(self, monkeypatch):
+        """Orchestrator without strategy config should default to vol_breakout."""
+        monkeypatch.delenv("STRATEGY", raising=False)
+        from src.intelligence.orchestrator import IntelligenceOrchestrator
 
-    config = {
-        "enable_regime": False,
-        "enable_lead_lag": False,
-        "enable_whale": False,
-        "account_balance": 110,
-    }
-    orch = IntelligenceOrchestrator(config)
-    assert orch.strategy is None
-    assert orch.strategy_name == "rsi_regime"
+        config = {
+            "enable_regime": False,
+            "enable_lead_lag": False,
+            "enable_whale": False,
+            "account_balance": 110,
+        }
+        orch = IntelligenceOrchestrator(config)
+        assert orch.strategy is not None
+        assert orch.strategy_name == "vol_breakout"

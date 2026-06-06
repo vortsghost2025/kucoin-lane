@@ -1,0 +1,1184 @@
+#!/usr/bin/env python3
+"""
+Short + Leverage Mega Multi-Strategy Backtest Sweep — 5yr BTC/USDT daily data.
+
+EXTENDS run_mega_sweep.py with:
+1. Regime-aware SHORT positions (short in bear, long in bull)
+2. Leverage simulation (1x–20x) with KuCoin futures liquidation logic
+3. Futures fee structure (0.02% maker / 0.06% taker)
+4. Funding rate costs/benefits (avg 0.03%/day)
+
+Key insight from prior sweep: 1d timeframe has massive edge (79-83% profitable
+configs spot-long-only). This sweep asks: how much MORE edge do we get from
+shorting bear regimes and using moderate leverage?
+
+KuCoin USDT-M Futures specs:
+- 1 contract = 0.001 BTC
+- Leverage: 1x–125x (tier-based)
+- Fees: 0.02% maker / 0.06% taker
+- Maintenance margin: 0.4% (tier 1, <10K USDT)
+- Funding: avg +0.01% per 8h = +0.03%/day (longs pay shorts)
+
+Usage:
+    python3 scripts/research/run_short_leverage_sweep.py
+    python3 scripts/research/run_short_leverage_sweep.py --leverages 1,2,5,10
+    python3 scripts/research/run_short_leverage_sweep.py --strategies vol_breakout,supertrend
+    python3 scripts/research/run_short_leverage_sweep.py --fee-modes futures_taker,futures_maker
+"""
+from __future__ import annotations
+import argparse
+import csv
+import json
+import math
+import sys
+import time
+from dataclasses import dataclass, asdict
+from itertools import product
+from pathlib import Path
+from typing import Dict, List, Tuple
+
+import numpy as np
+
+# =========================================================================== #
+# Data loading (copied from run_mega_sweep.py for self-containment)
+# =========================================================================== #
+def load_csv(path: Path) -> dict[str, np.ndarray]:
+    rows = list(csv.DictReader(path.open()))
+    return {
+        "ts": np.array([int(r["ts"]) for r in rows], dtype=np.int64),
+        "open": np.array([float(r["open"]) for r in rows]),
+        "high": np.array([float(r["high"]) for r in rows]),
+        "low": np.array([float(r["low"]) for r in rows]),
+        "close": np.array([float(r["close"]) for r in rows]),
+        "volume": np.array([float(r["volume"]) for r in rows]),
+    }
+
+
+# =========================================================================== #
+# Core indicators (numpy only — same as run_mega_sweep.py)
+# =========================================================================== #
+def ema(arr: np.ndarray, period: int) -> np.ndarray:
+    alpha = 2.0 / (period + 1)
+    out = np.empty_like(arr)
+    out[0] = arr[0]
+    for i in range(1, len(arr)):
+        out[i] = alpha * arr[i] + (1 - alpha) * out[i - 1]
+    return out
+
+
+def sma(arr: np.ndarray, period: int) -> np.ndarray:
+    out = np.empty_like(arr)
+    out[:period] = arr[:period]
+    for i in range(period - 1, len(arr)):
+        out[i] = arr[i - period + 1:i + 1].mean()
+    return out
+
+
+def wilder_rsi(close: np.ndarray, period: int = 14) -> np.ndarray:
+    delta = np.diff(close, prepend=close[0])
+    gain = np.where(delta > 0, delta, 0.0)
+    loss = np.where(delta < 0, -delta, 0.0)
+    avg_gain = np.empty_like(close)
+    avg_loss = np.empty_like(close)
+    avg_gain[:period] = gain[:period].mean()
+    avg_loss[:period] = loss[:period].mean()
+    for i in range(period, len(close)):
+        avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gain[i]) / period
+        avg_loss[i] = (avg_loss[i - 1] * (period - 1) + loss[i]) / period
+    rs = np.where(avg_loss == 0, 0.0, avg_gain / np.maximum(avg_loss, 1e-12))
+    rsi = np.where(avg_loss == 0, 100.0, 100.0 - (100.0 / (1.0 + rs)))
+    return rsi
+
+
+def atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    out = np.empty_like(tr)
+    out[:period] = tr[:period].mean()
+    for i in range(period, len(tr)):
+        out[i] = (out[i - 1] * (period - 1) + tr[i]) / period
+    return out
+
+
+def adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14):
+    delta_high = high - np.roll(high, 1)
+    delta_low = np.roll(low, 1) - low
+    delta_high[0] = 0; delta_low[0] = 0
+    plus_dm = np.where((delta_high > delta_low) & (delta_high > 0), delta_high, 0.0)
+    minus_dm = np.where((delta_low > delta_high) & (delta_low > 0), delta_low, 0.0)
+    tr = np.maximum(high - low, np.maximum(np.abs(high - np.roll(close, 1)), np.abs(low - np.roll(close, 1))))
+    tr[0] = high[0] - low[0]
+    atr_val = np.empty_like(tr)
+    atr_val[:period] = tr[:period].mean()
+    for i in range(period, len(tr)):
+        atr_val[i] = (atr_val[i - 1] * (period - 1) + tr[i]) / period
+    smooth_plus = np.empty_like(tr); smooth_minus = np.empty_like(tr)
+    smooth_plus[:period] = plus_dm[:period].sum()
+    smooth_minus[:period] = minus_dm[:period].sum()
+    for i in range(period, len(tr)):
+        smooth_plus[i] = smooth_plus[i - 1] - smooth_plus[i - 1] / period + plus_dm[i]
+        smooth_minus[i] = smooth_minus[i - 1] - smooth_minus[i - 1] / period + minus_dm[i]
+    plus_di = np.where(atr_val > 0, smooth_plus / atr_val * 100, 0.0)
+    minus_di = np.where(atr_val > 0, smooth_minus / atr_val * 100, 0.0)
+    dx = np.where((plus_di + minus_di) > 0, np.abs(plus_di - minus_di) / (plus_di + minus_di) * 100, 0.0)
+    adx_val = np.empty_like(dx)
+    adx_val[:period * 2] = dx[:period * 2].mean()
+    for i in range(period * 2, len(dx)):
+        adx_val[i] = (adx_val[i - 1] * (period - 1) + dx[i]) / period
+    return adx_val, plus_di, minus_di
+
+
+def bollinger_bands(close: np.ndarray, period: int = 20, num_std: float = 2.0):
+    mid = sma(close, period)
+    std = np.empty_like(close)
+    std[:period] = 0
+    for i in range(period - 1, len(close)):
+        std[i] = close[i - period + 1:i + 1].std()
+    upper = mid + num_std * std
+    lower = mid - num_std * std
+    return upper, mid, lower
+
+
+def supertrend(high: np.ndarray, low: np.ndarray, close: np.ndarray,
+               atr_period: int = 10, atr_mult: float = 3.0):
+    atr_val = atr(high, low, close, atr_period)
+    hl2 = (high + low) / 2.0
+    n = len(close)
+    upper_band = hl2 + atr_mult * atr_val
+    lower_band = hl2 - atr_mult * atr_val
+    final_upper = np.empty_like(close); final_lower = np.empty_like(close)
+    direction = np.ones(n, dtype=np.int8); st_val = np.empty_like(close)
+    final_upper[0] = upper_band[0]; final_lower[0] = lower_band[0]
+    direction[0] = 1; st_val[0] = lower_band[0]
+    for i in range(1, n):
+        if lower_band[i] > final_lower[i - 1] or close[i - 1] < final_lower[i - 1]:
+            final_lower[i] = lower_band[i]
+        else:
+            final_lower[i] = final_lower[i - 1]
+        if upper_band[i] < final_upper[i - 1] or close[i - 1] > final_upper[i - 1]:
+            final_upper[i] = upper_band[i]
+        else:
+            final_upper[i] = final_upper[i - 1]
+        if direction[i - 1] == 1:
+            direction[i] = -1 if close[i] < final_lower[i] else 1
+        else:
+            direction[i] = 1 if close[i] > final_upper[i] else -1
+        st_val[i] = final_lower[i] if direction[i] == 1 else final_upper[i]
+    return st_val, direction
+
+
+def stochastic(high, low, close, k_period=14, d_period=3):
+    n = len(close); pct_k = np.empty(n)
+    for i in range(k_period - 1, n):
+        hh = high[i - k_period + 1:i + 1].max(); ll = low[i - k_period + 1:i + 1].min()
+        pct_k[i] = (close[i] - ll) / (hh - ll) * 100.0 if hh != ll else 50.0
+    pct_k[:k_period - 1] = 50.0
+    pct_d = sma(pct_k, d_period)
+    return pct_k, pct_d
+
+
+def donchian_channel(high, low, period=20):
+    n = len(high); upper = np.empty(n); lower = np.empty(n)
+    for i in range(period - 1, n):
+        upper[i] = high[i - period + 1:i + 1].max()
+        lower[i] = low[i - period + 1:i + 1].min()
+    upper[:period - 1] = high[:period - 1]; lower[:period - 1] = low[:period - 1]
+    return upper, lower
+
+
+def williams_pct_r(high, low, close, period=14):
+    n = len(close); out = np.empty(n)
+    for i in range(period - 1, n):
+        hh = high[i - period + 1:i + 1].max(); ll = low[i - period + 1:i + 1].min()
+        out[i] = (hh - close[i]) / (hh - ll) * -100.0 if hh != ll else -50.0
+    out[:period - 1] = -50.0
+    return out
+
+
+def ema_slope(ema_arr, lookback=20):
+    n = len(ema_arr); slope = np.zeros(n)
+    x = np.arange(lookback, dtype=float); x_mean = x.mean()
+    x_var = ((x - x_mean) ** 2).sum()
+    for i in range(lookback - 1, n):
+        y = ema_arr[i - lookback + 1:i + 1]; y_mean = y.mean()
+        slope[i] = ((x - x_mean) * (y - y_mean)).sum() / x_var if x_var > 0 else 0.0
+    return slope
+
+
+def classify_regime(close, ema200):
+    slope = ema_slope(ema200, 20)
+    regime = np.zeros(len(close), dtype=np.int8)
+    regime[(close > ema200) & (slope > 0)] = 1   # BULL
+    regime[(close < ema200) & (slope < 0)] = -1   # BEAR
+    return regime
+
+
+# =========================================================================== #
+# Signal builders (same as run_mega_sweep.py)
+# =========================================================================== #
+def signals_rsi(close, rsi, ema_slow, rsi_buy, rsi_sell, require_trend):
+    rsi_prev = np.empty_like(rsi); rsi_prev[0] = rsi[0]; rsi_prev[1:] = rsi[:-1]
+    buy = (rsi_prev < rsi_buy) & (rsi >= rsi_buy)
+    if require_trend: buy = buy & (close > ema_slow)
+    sell = (rsi_prev > rsi_sell) & (rsi <= rsi_sell)
+    return buy, sell
+
+
+def signals_ema_cross(ema_fast, ema_slow):
+    diff = ema_fast - ema_slow; prev_diff = np.empty_like(diff)
+    prev_diff[0] = 0.0; prev_diff[1:] = diff[:-1]
+    buy = (prev_diff <= 0) & (diff > 0); sell = (prev_diff >= 0) & (diff < 0)
+    return buy, sell
+
+
+def signals_bb(close, bb_upper, bb_lower):
+    prev_below = np.empty(len(close), dtype=bool); prev_below[0] = False
+    prev_below[1:] = close[:-1] < bb_lower[:-1]; curr_above = close > bb_lower
+    buy = prev_below & curr_above; sell = close >= bb_upper
+    return buy, sell
+
+
+def signals_supertrend(direction):
+    prev_dir = np.empty_like(direction); prev_dir[0] = direction[0]; prev_dir[1:] = direction[:-1]
+    buy = (prev_dir == -1) & (direction == 1); sell = (prev_dir == 1) & (direction == -1)
+    return buy, sell
+
+
+def signals_regime_switch(close, rsi, ema_fast, ema_slow, adx_val, plus_di, minus_di, adx_thresh, rsi_buy, rsi_sell):
+    ema_buy, ema_sell = signals_ema_cross(ema_fast, ema_slow)
+    rsi_buy_sig, rsi_sell_sig = signals_rsi(close, rsi, ema_slow, rsi_buy, rsi_sell, False)
+    trending = adx_val > adx_thresh
+    buy = np.where(trending, ema_buy, rsi_buy_sig); sell = np.where(trending, ema_sell, rsi_sell_sig)
+    return buy, sell
+
+
+def signals_donchian(close, dc_upper, dc_lower):
+    prev_close = np.empty_like(close); prev_close[0] = close[0]; prev_close[1:] = close[:-1]
+    buy = (close > dc_upper) & (prev_close <= dc_upper); sell = (close < dc_lower) & (prev_close >= dc_lower)
+    return buy, sell
+
+
+def signals_macd(macd_line, signal_line):
+    diff = macd_line - signal_line; prev_diff = np.empty_like(diff)
+    prev_diff[0] = 0.0; prev_diff[1:] = diff[:-1]
+    buy = (prev_diff <= 0) & (diff > 0); sell = (prev_diff >= 0) & (diff < 0)
+    return buy, sell
+
+
+def signals_stochastic(pct_k, pct_d, oversold=20, overbought=80):
+    prev_k = np.empty_like(pct_k); prev_k[0] = pct_k[0]; prev_k[1:] = pct_k[:-1]
+    prev_d = np.empty_like(pct_d); prev_d[0] = pct_d[0]; prev_d[1:] = pct_d[:-1]
+    buy = (prev_k < prev_d) & (pct_k >= pct_d) & (pct_k < oversold)
+    sell = (prev_k > prev_d) & (pct_k <= pct_d) & (pct_k > overbought)
+    return buy, sell
+
+
+def signals_vol_breakout(close, atr_val, atr_mult_entry):
+    prev_close = np.empty_like(close); prev_close[0] = close[0]; prev_close[1:] = close[:-1]
+    threshold = prev_close + atr_mult_entry * atr_val
+    buy = close > threshold; sell = np.zeros(len(close), dtype=bool)
+    return buy, sell
+
+
+def signals_williams(pct_r, oversold=-80, overbought=-20):
+    prev = np.empty_like(pct_r); prev[0] = pct_r[0]; prev[1:] = pct_r[:-1]
+    buy = (prev < oversold) & (pct_r >= oversold); sell = (prev > overbought) & (pct_r <= overbought)
+    return buy, sell
+
+
+# =========================================================================== #
+# Strategy param grids (same as run_mega_sweep.py)
+# =========================================================================== #
+ALL_STRATEGIES = ["rsi", "ema_cross", "bb", "supertrend", "regime_switch",
+                  "donchian", "macd", "stochastic", "vol_breakout", "williams"]
+
+COMMON_RISK = [0.005, 0.0075, 0.01, 0.02, 0.05]
+COMMON_SL = [1.5, 2.0, 3.0, 5.0]
+COMMON_RR = [1.5, 2.0, 3.0]
+COMMON_TRAIL_ACT = [1.5, 2.0, 3.0]
+COMMON_TRAIL = [1.5]
+COMMON_BE_ACT = [1.0]
+COMMON_MIN_PROFIT_HOLD = [1.0]
+
+
+def grid_rsi():
+    for risk, sl, rr, ta, tp, ba, mph in product(
+        COMMON_RISK, COMMON_SL, COMMON_RR, COMMON_TRAIL_ACT, COMMON_TRAIL, COMMON_BE_ACT, COMMON_MIN_PROFIT_HOLD
+    ):
+        for rsi_buy, rsi_sell in product([25, 30, 35, 40], [65, 70, 75]):
+            for ema_slow, require_trend in product([50, 100], [True, False]):
+                yield {"strategy": "rsi", "risk_pct": risk, "stop_loss_pct": sl, "rr": rr,
+                       "trail_activate_pct": ta, "trail_pct": tp,
+                       "breakeven_activate_pct": ba, "min_profit_hold_pct": mph,
+                       "rsi_buy": rsi_buy, "rsi_sell": rsi_sell,
+                       "ema_slow": ema_slow, "require_trend": require_trend}
+
+
+def grid_ema_cross():
+    for risk, sl, rr, ta, tp, ba, mph in product(
+        COMMON_RISK, COMMON_SL, COMMON_RR, COMMON_TRAIL_ACT, COMMON_TRAIL, COMMON_BE_ACT, COMMON_MIN_PROFIT_HOLD
+    ):
+        for ema_fast, ema_slow in product([9, 12, 21], [50, 100, 200]):
+            yield {"strategy": "ema_cross", "risk_pct": risk, "stop_loss_pct": sl, "rr": rr,
+                   "trail_activate_pct": ta, "trail_pct": tp,
+                   "breakeven_activate_pct": ba, "min_profit_hold_pct": mph,
+                   "ema_fast": ema_fast, "ema_slow": ema_slow}
+
+
+def grid_bb():
+    for risk, sl, rr, ta, tp, ba, mph in product(
+        COMMON_RISK, COMMON_SL, COMMON_RR, COMMON_TRAIL_ACT, COMMON_TRAIL, COMMON_BE_ACT, COMMON_MIN_PROFIT_HOLD
+    ):
+        for bb_std in [2.0, 2.5, 3.0]:
+            yield {"strategy": "bb", "risk_pct": risk, "stop_loss_pct": sl, "rr": rr,
+                   "trail_activate_pct": ta, "trail_pct": tp,
+                   "breakeven_activate_pct": ba, "min_profit_hold_pct": mph,
+                   "bb_period": 20, "bb_std": bb_std}
+
+
+def grid_supertrend():
+    for risk, sl, rr, ta, tp, ba, mph in product(
+        COMMON_RISK, COMMON_SL, COMMON_RR, COMMON_TRAIL_ACT, COMMON_TRAIL, COMMON_BE_ACT, COMMON_MIN_PROFIT_HOLD
+    ):
+        for atr_period, atr_mult in product([10, 14], [2.0, 2.5, 3.0, 3.5]):
+            yield {"strategy": "supertrend", "risk_pct": risk, "stop_loss_pct": sl, "rr": rr,
+                   "trail_activate_pct": ta, "trail_pct": tp,
+                   "breakeven_activate_pct": ba, "min_profit_hold_pct": mph,
+                   "atr_period": atr_period, "atr_mult": atr_mult}
+
+
+def grid_regime_switch():
+    for risk, sl, rr, ta, tp, ba, mph in product(
+        COMMON_RISK, COMMON_SL, COMMON_RR, COMMON_TRAIL_ACT, COMMON_TRAIL, COMMON_BE_ACT, COMMON_MIN_PROFIT_HOLD
+    ):
+        for adx_thresh, rsi_buy in product([20, 25, 30], [30, 35, 40]):
+            for ema_fast, ema_slow in product([9, 21], [50, 100]):
+                yield {"strategy": "regime_switch", "risk_pct": risk, "stop_loss_pct": sl, "rr": rr,
+                       "trail_activate_pct": ta, "trail_pct": tp,
+                       "breakeven_activate_pct": ba, "min_profit_hold_pct": mph,
+                       "adx_thresh": adx_thresh, "rsi_buy": rsi_buy, "rsi_sell": 70,
+                       "ema_fast": ema_fast, "ema_slow": ema_slow}
+
+
+def grid_donchian():
+    for risk, sl, rr, ta, tp, ba, mph in product(
+        COMMON_RISK, COMMON_SL, COMMON_RR, COMMON_TRAIL_ACT, COMMON_TRAIL, COMMON_BE_ACT, COMMON_MIN_PROFIT_HOLD
+    ):
+        for channel_period in [20, 40, 55]:
+            yield {"strategy": "donchian", "risk_pct": risk, "stop_loss_pct": sl, "rr": rr,
+                   "trail_activate_pct": ta, "trail_pct": tp,
+                   "breakeven_activate_pct": ba, "min_profit_hold_pct": mph,
+                   "channel_period": channel_period}
+
+
+def grid_macd():
+    for risk, sl, rr, ta, tp, ba, mph in product(
+        COMMON_RISK, COMMON_SL, COMMON_RR, COMMON_TRAIL_ACT, COMMON_TRAIL, COMMON_BE_ACT, COMMON_MIN_PROFIT_HOLD
+    ):
+        yield {"strategy": "macd", "risk_pct": risk, "stop_loss_pct": sl, "rr": rr,
+               "trail_activate_pct": ta, "trail_pct": tp,
+               "breakeven_activate_pct": ba, "min_profit_hold_pct": mph}
+
+
+def grid_stochastic():
+    for risk, sl, rr, ta, tp, ba, mph in product(
+        COMMON_RISK, COMMON_SL, COMMON_RR, COMMON_TRAIL_ACT, COMMON_TRAIL, COMMON_BE_ACT, COMMON_MIN_PROFIT_HOLD
+    ):
+        yield {"strategy": "stochastic", "risk_pct": risk, "stop_loss_pct": sl, "rr": rr,
+               "trail_activate_pct": ta, "trail_pct": tp,
+               "breakeven_activate_pct": ba, "min_profit_hold_pct": mph}
+
+
+def grid_vol_breakout():
+    for risk, sl, rr, ta, tp, ba, mph in product(
+        COMMON_RISK, COMMON_SL, COMMON_RR, COMMON_TRAIL_ACT, COMMON_TRAIL, COMMON_BE_ACT, COMMON_MIN_PROFIT_HOLD
+    ):
+        for atr_mult_entry, atr_mult_trail, max_bars in product([1.0, 1.5, 2.0], [1.5, 2.0, 2.5], [48, 96]):
+            yield {"strategy": "vol_breakout", "risk_pct": risk, "stop_loss_pct": sl, "rr": rr,
+                   "trail_activate_pct": ta, "trail_pct": tp,
+                   "breakeven_activate_pct": ba, "min_profit_hold_pct": mph,
+                   "atr_mult_entry": atr_mult_entry, "atr_mult_trail": atr_mult_trail, "max_bars": max_bars}
+
+
+def grid_williams():
+    for risk, sl, rr, ta, tp, ba, mph in product(
+        COMMON_RISK, COMMON_SL, COMMON_RR, COMMON_TRAIL_ACT, COMMON_TRAIL, COMMON_BE_ACT, COMMON_MIN_PROFIT_HOLD
+    ):
+        yield {"strategy": "williams", "risk_pct": risk, "stop_loss_pct": sl, "rr": rr,
+               "trail_activate_pct": ta, "trail_pct": tp,
+               "breakeven_activate_pct": ba, "min_profit_hold_pct": mph}
+
+
+GRID_FUNCS = {
+    "rsi": grid_rsi, "ema_cross": grid_ema_cross, "bb": grid_bb,
+    "supertrend": grid_supertrend, "regime_switch": grid_regime_switch,
+    "donchian": grid_donchian, "macd": grid_macd, "stochastic": grid_stochastic,
+    "vol_breakout": grid_vol_breakout, "williams": grid_williams,
+}
+
+
+# =========================================================================== #
+# Indicator cache + signal dispatcher (same as run_mega_sweep.py)
+# =========================================================================== #
+def precompute_indicators(bars):
+    close = bars["close"]; high = bars["high"]; low = bars["low"]
+    n = len(close)
+    print(f"  Pre-computing indicators for {n} bars...")
+    cache = {}
+    for p in [9, 12, 21, 26, 50, 100, 200]:
+        cache[f"ema_{p}"] = ema(close, p)
+    cache["rsi_14"] = wilder_rsi(close, 14)
+    cache["atr_10"] = atr(high, low, close, 10)
+    cache["atr_14"] = atr(high, low, close, 14)
+    adx_val, plus_di, minus_di = adx(high, low, close, 14)
+    cache["adx_14"] = adx_val; cache["plus_di_14"] = plus_di; cache["minus_di_14"] = minus_di
+    for std in [2.0, 2.5, 3.0]:
+        u, m, lo = bollinger_bands(close, 20, std)
+        cache[f"bb_upper_{std}"] = u; cache[f"bb_mid_{std}"] = m; cache[f"bb_lower_{std}"] = lo
+    for atr_p, atr_m in [(10,2.0),(10,2.5),(10,3.0),(10,3.5),(14,2.0),(14,2.5),(14,3.0),(14,3.5)]:
+        st_val, st_dir = supertrend(high, low, close, atr_p, atr_m)
+        cache[f"st_val_{atr_p}_{atr_m}"] = st_val; cache[f"st_dir_{atr_p}_{atr_m}"] = st_dir
+    cache["macd_line"] = cache["ema_12"] - cache["ema_26"]
+    cache["macd_signal"] = ema(cache["macd_line"], 9)
+    cache["stoch_k"], cache["stoch_d"] = stochastic(high, low, close, 14, 3)
+    for p in [20, 40, 55]:
+        u, lo = donchian_channel(high, low, p)
+        cache[f"dc_upper_{p}"] = u; cache[f"dc_lower_{p}"] = lo
+    cache["williams_r_14"] = williams_pct_r(high, low, close, 14)
+    cache["regime"] = classify_regime(close, cache["ema_200"])
+    print(f"  Cached {len(cache)} indicator arrays")
+    return cache
+
+
+def build_signals_for_combo(params, cache, bars):
+    close = bars["close"]; strategy = params["strategy"]
+    if strategy == "rsi":
+        rsi = cache["rsi_14"]; ema_s = cache[f"ema_{params['ema_slow']}"]
+        buy, sell = signals_rsi(close, rsi, ema_s, params["rsi_buy"], params["rsi_sell"], params["require_trend"])
+        warmup = max(params["ema_slow"], 14, 200) + 1; return buy, sell, warmup, 0
+    elif strategy == "ema_cross":
+        ema_f = cache[f"ema_{params['ema_fast']}"]; ema_s = cache[f"ema_{params['ema_slow']}"]
+        buy, sell = signals_ema_cross(ema_f, ema_s)
+        warmup = max(params["ema_slow"], 200) + 1; return buy, sell, warmup, 0
+    elif strategy == "bb":
+        bb_std = params["bb_std"]
+        buy, sell = signals_bb(close, cache[f"bb_upper_{bb_std}"], cache[f"bb_lower_{bb_std}"])
+        warmup = max(20, 200) + 1; return buy, sell, warmup, 0
+    elif strategy == "supertrend":
+        atr_p = params["atr_period"]; atr_m = params["atr_mult"]
+        buy, sell = signals_supertrend(cache[f"st_dir_{atr_p}_{atr_m}"])
+        warmup = max(atr_p, 200) + 1; return buy, sell, warmup, 0
+    elif strategy == "regime_switch":
+        ema_f = cache[f"ema_{params['ema_fast']}"]; ema_s = cache[f"ema_{params['ema_slow']}"]
+        rsi = cache["rsi_14"]; adx_val = cache["adx_14"]; plus_di = cache["plus_di_14"]; minus_di = cache["minus_di_14"]
+        buy, sell = signals_regime_switch(close, rsi, ema_f, ema_s, adx_val, plus_di, minus_di,
+                                          params["adx_thresh"], params["rsi_buy"], params["rsi_sell"])
+        warmup = max(params["ema_slow"], 28, 200) + 1; return buy, sell, warmup, 0
+    elif strategy == "donchian":
+        cp = params["channel_period"]
+        buy, sell = signals_donchian(close, cache[f"dc_upper_{cp}"], cache[f"dc_lower_{cp}"])
+        warmup = max(cp, 200) + 1; return buy, sell, warmup, 0
+    elif strategy == "macd":
+        buy, sell = signals_macd(cache["macd_line"], cache["macd_signal"])
+        warmup = max(26, 200) + 1; return buy, sell, warmup, 0
+    elif strategy == "stochastic":
+        buy, sell = signals_stochastic(cache["stoch_k"], cache["stoch_d"], 20, 80)
+        warmup = max(14, 200) + 1; return buy, sell, warmup, 0
+    elif strategy == "vol_breakout":
+        atr_val = cache["atr_14"]
+        buy, sell = signals_vol_breakout(close, atr_val, params["atr_mult_entry"])
+        warmup = max(14, 200) + 1; return buy, sell, warmup, params["max_bars"]
+    elif strategy == "williams":
+        buy, sell = signals_williams(cache["williams_r_14"], -80, -20)
+        warmup = max(14, 200) + 1; return buy, sell, warmup, 0
+    else:
+        raise ValueError(f"Unknown strategy: {strategy}")
+
+
+# =========================================================================== #
+# NEW: Short + Leverage simulation engine
+# =========================================================================== #
+@dataclass
+class Result:
+    strategy: str
+    risk_pct: float; stop_loss_pct: float; rr: float
+    trail_activate_pct: float; trail_pct: float
+    breakeven_activate_pct: float; min_profit_hold_pct: float
+    strategy_params: str
+    # Short/leverage params
+    allow_short: bool; leverage: int
+    regime_short_mode: str   # "bear_only" or "bear_and_range"
+    fee_mode: str            # "spot_taker", "spot_maker", "futures_taker", "futures_maker"
+    # Outcomes
+    trades: int; wins: int; win_rate: float
+    final_equity: float; net_return_pct: float
+    max_drawdown_pct: float; profit_factor: float
+    avg_win_pct: float; avg_loss_pct: float; sharpe_like: float
+    # Regime breakdown
+    bull_trades: int; bear_trades: int; range_trades: int
+    bull_pnl_pct: float; bear_pnl_pct: float; range_pnl_pct: float
+    # Long vs short breakdown
+    long_trades: int; short_trades: int
+    long_pnl_pct: float; short_pnl_pct: float
+    # Liquidation count
+    liquidations: int
+    # Meta
+    days: float
+
+
+def simulate_short_leverage(
+    bars, buy, sell, regime,
+    start_equity, risk_pct, stop_loss_pct, rr,
+    trail_activate_pct, trail_pct, breakeven_activate_pct,
+    min_profit_hold_pct, fee_pct,
+    micro_account_threshold, confidence_floor, asset_multiplier,
+    min_notional, warmup, max_bars_in_trade,
+    # NEW parameters:
+    allow_short=True,
+    leverage=1,
+    maint_margin_rate=0.004,   # KuCoin tier 1: 0.4%
+    funding_rate_daily=0.0003, # avg 0.03%/day
+    regime_short_mode="bear_only",
+) -> Tuple[List[float], List[float], List[bool], float, dict]:
+    """
+    Simulate with regime-aware short positions and leverage.
+
+    In BEAR regime (or BEAR+RANGE if configured), buy signals open SHORT positions
+    instead of longs. Leverage amplifies position size; liquidation is checked
+    each bar. Funding rate is applied per bar held.
+    """
+    high = bars["high"]; low = bars["low"]; close = bars["close"]
+    n = len(close)
+
+    equity = start_equity; peak_equity = start_equity; max_dd = 0.0
+    equity_curve = [equity]
+    trade_returns = []; win_flags = []
+
+    # Tracking
+    regime_pnl = {1: 0.0, -1: 0.0, 0: 0.0}
+    regime_trades = {1: 0, -1: 0, 0: 0}
+    long_trades = 0; short_trades = 0; long_pnl = 0.0; short_pnl = 0.0
+    liquidation_count = 0
+
+    # Position state
+    in_pos = False; pos_side = "long"  # "long" or "short"
+    entry_price = 0.0; qty = 0.0; stop = 0.0; take = 0.0
+    trail_armed = False; breakeven_done = False
+    peak_in_trade = 0.0; trough_in_trade = float("inf")
+    entry_bar = 0; entry_regime = 0; margin_used = 0.0
+
+    for i in range(warmup, n):
+        h, l, c = high[i], low[i], close[i]
+        cur_regime = int(regime[i])
+
+        # Determine if current regime allows short
+        can_short_here = allow_short and (
+            (regime_short_mode == "bear_only" and cur_regime == -1) or
+            (regime_short_mode == "bear_and_range" and cur_regime in (-1, 0))
+        )
+
+        if in_pos:
+            bars_held = i - entry_bar
+
+            # --- Funding rate accrual (per bar held) ---
+            # Longs PAY funding, shorts RECEIVE funding
+            if leverage > 1:  # funding only applies to leveraged/futures positions
+                notional = qty * entry_price
+                funding_cost = funding_rate_daily * notional
+                if pos_side == "long":
+                    equity -= funding_cost  # longs pay
+                else:
+                    equity += funding_cost  # shorts receive
+
+            if pos_side == "long":
+                peak_in_trade = max(peak_in_trade, h)
+
+                # Breakeven
+                if not breakeven_done:
+                    if (peak_in_trade / entry_price - 1.0) * 100.0 >= breakeven_activate_pct:
+                        stop = max(stop, entry_price * (1.0 + fee_pct * 2))
+                        breakeven_done = True
+
+                # Trailing
+                if not trail_armed:
+                    if (peak_in_trade / entry_price - 1.0) * 100.0 >= trail_activate_pct:
+                        trail_armed = True
+                if trail_armed:
+                    new_stop = peak_in_trade * (1.0 - trail_pct / 100.0)
+                    stop = max(stop, new_stop)
+
+                # Liquidation check (for leveraged positions)
+                liq_price = 0.0
+                if leverage > 1:
+                    liq_price = entry_price * (1.0 - (1.0 / leverage - maint_margin_rate))
+
+                # Exit checks (priority: liquidation > stop > TP > sell signal > max bars)
+                exit_price = None; exit_reason = ""
+                if leverage > 1 and l <= liq_price:
+                    exit_price = liq_price; exit_reason = "liquidation"
+                elif l <= stop:
+                    exit_price = stop; exit_reason = "stop"
+                elif h >= take:
+                    exit_price = take; exit_reason = "tp"
+                elif sell[i]:
+                    cur_profit_pct = (c / entry_price - 1.0) * 100.0
+                    if cur_profit_pct < min_profit_hold_pct:
+                        exit_price = c; exit_reason = "sell_signal"
+                elif max_bars_in_trade > 0 and bars_held >= max_bars_in_trade:
+                    exit_price = c; exit_reason = "max_bars"
+
+            else:  # SHORT position
+                trough_in_trade = min(trough_in_trade, l)
+
+                # Breakeven for short: move stop down to entry
+                if not breakeven_done:
+                    if (entry_price / trough_in_trade - 1.0) * 100.0 >= breakeven_activate_pct:
+                        stop = min(stop, entry_price * (1.0 - fee_pct * 2))
+                        breakeven_done = True
+
+                # Trailing for short: track lowest, trail stop DOWN
+                if not trail_armed:
+                    if (entry_price / trough_in_trade - 1.0) * 100.0 >= trail_activate_pct:
+                        trail_armed = True
+                if trail_armed:
+                    new_stop = trough_in_trade * (1.0 + trail_pct / 100.0)
+                    stop = min(stop, new_stop)
+
+                # Liquidation for short
+                liq_price = float("inf")
+                if leverage > 1:
+                    liq_price = entry_price * (1.0 + (1.0 / leverage - maint_margin_rate))
+
+                # Exit checks for SHORT
+                exit_price = None; exit_reason = ""
+                if leverage > 1 and h >= liq_price:
+                    exit_price = liq_price; exit_reason = "liquidation"
+                elif h >= stop:
+                    exit_price = stop; exit_reason = "stop"
+                elif l <= take:
+                    exit_price = take; exit_reason = "tp"
+                elif sell[i]:
+                    # sell signal in short context = cover signal
+                    cur_profit_pct = (entry_price / c - 1.0) * 100.0
+                    if cur_profit_pct < min_profit_hold_pct:
+                        exit_price = c; exit_reason = "sell_signal"
+                elif max_bars_in_trade > 0 and bars_held >= max_bars_in_trade:
+                    exit_price = c; exit_reason = "max_bars"
+
+            # --- Process exit ---
+            if exit_price is not None:
+                if pos_side == "long":
+                    gross_ret = (exit_price - entry_price) / entry_price
+                else:  # short
+                    gross_ret = (entry_price - exit_price) / entry_price
+
+                net_ret = gross_ret - 2 * fee_pct
+
+                # For liquidation, cap loss at margin (can't lose more than margin)
+                if exit_reason == "liquidation":
+                    net_ret = max(net_ret, -1.0 / leverage)
+                    liquidation_count += 1
+
+            # PnL: apply leverage to the actual equity impact
+            # margin_used = notional / leverage
+            # actual_pnl = net_ret * notional = net_ret * margin_used * leverage
+            # Note: qty already includes leverage, so no additional * leverage needed here
+            pnl = qty * entry_price * net_ret
+            equity += pnl
+
+            trade_returns.append(net_ret * 100.0 * leverage)  # leveraged return on margin
+            win_flags.append(pnl > 0)
+            regime_pnl[entry_regime] += net_ret * 100.0 * leverage
+            regime_trades[entry_regime] += 1
+                if pos_side == "long":
+                    long_trades += 1; long_pnl += net_ret * 100.0 * leverage
+                else:
+                    short_trades += 1; short_pnl += net_ret * 100.0 * leverage
+
+                in_pos = False; qty = 0.0; trail_armed = False; breakeven_done = False
+                peak_in_trade = 0.0; trough_in_trade = float("inf"); margin_used = 0.0
+                peak_equity = max(peak_equity, equity)
+                dd = (peak_equity - equity) / peak_equity * 100.0 if peak_equity > 0 else 0
+                max_dd = max(max_dd, dd)
+                equity_curve.append(equity)
+
+        # --- New entry ---
+        if not in_pos and buy[i]:
+            # Decide side based on regime
+            if can_short_here:
+                pos_side = "short"
+            else:
+                pos_side = "long"
+
+            max_risk_amount = equity * risk_pct
+            if equity < micro_account_threshold:
+                cm = 1.0
+            else:
+                cm = max(0.5, confidence_floor)
+            risk_dollars = max_risk_amount * cm
+
+            if pos_side == "long":
+                risk_per_unit = c * (stop_loss_pct / 100.0)
+            else:  # short
+                risk_per_unit = c * (stop_loss_pct / 100.0)
+
+            if risk_per_unit <= 0:
+                continue
+
+            raw_qty = risk_dollars / risk_per_unit
+            qty_attempt = raw_qty * asset_multiplier
+
+            # Apply leverage: position = margin * leverage
+            # margin = notional / leverage → notional = qty * price
+            # We want: margin_used = notional / leverage <= equity * 0.95
+            notional_base = qty_attempt * c
+            if leverage > 1:
+                # Scale position by leverage but keep margin within equity
+                margin_needed = notional_base / leverage
+                if margin_needed > equity * 0.95:
+                    qty_attempt = (equity * 0.95 * leverage) / c
+                    notional_base = qty_attempt * c
+
+            if notional_base < min_notional:
+                continue
+            # Also cap total notional at equity * leverage * 0.95
+            max_notional = equity * leverage * 0.95
+            if notional_base > max_notional:
+                qty_attempt = max_notional / c
+                notional_base = qty_attempt * c
+
+            in_pos = True
+            entry_price = c
+            qty = qty_attempt
+            margin_used = notional_base / leverage
+
+            if pos_side == "long":
+                stop = entry_price * (1.0 - stop_loss_pct / 100.0)
+                take = entry_price * (1.0 + (stop_loss_pct * rr) / 100.0)
+                peak_in_trade = entry_price
+            else:  # short
+                stop = entry_price * (1.0 + stop_loss_pct / 100.0)
+                take = entry_price * (1.0 - (stop_loss_pct * rr) / 100.0)
+                trough_in_trade = entry_price
+
+            entry_bar = i; entry_regime = cur_regime
+
+    # Close any open position at end
+    if in_pos:
+        if pos_side == "long":
+            gross_ret = (close[-1] - entry_price) / entry_price
+        else:
+            gross_ret = (entry_price - close[-1]) / entry_price
+         net_ret = gross_ret - 2 * fee_pct
+         pnl = qty * entry_price * net_ret
+         equity += pnl
+        trade_returns.append(net_ret * 100.0 * leverage)
+        win_flags.append(pnl > 0)
+        regime_pnl[entry_regime] += net_ret * 100.0 * leverage
+        regime_trades[entry_regime] += 1
+        if pos_side == "long":
+            long_trades += 1; long_pnl += net_ret * 100.0 * leverage
+        else:
+            short_trades += 1; short_pnl += net_ret * 100.0 * leverage
+        equity_curve[-1] = equity
+        peak_equity = max(peak_equity, equity)
+        dd = (peak_equity - equity) / peak_equity * 100.0 if peak_equity > 0 else 0
+        max_dd = max(max_dd, dd)
+
+    regime_stats = {
+        "bull_trades": regime_trades[1], "bear_trades": regime_trades[-1], "range_trades": regime_trades[0],
+        "bull_pnl_pct": regime_pnl[1], "bear_pnl_pct": regime_pnl[-1], "range_pnl_pct": regime_pnl[0],
+        "long_trades": long_trades, "short_trades": short_trades,
+        "long_pnl_pct": long_pnl, "short_pnl_pct": short_pnl,
+        "liquidations": liquidation_count,
+    }
+    return trade_returns, equity_curve, win_flags, max_dd, regime_stats
+
+
+# =========================================================================== #
+# Main runner
+# =========================================================================== #
+FEE_MODES = {
+    "spot_taker": 0.001,
+    "spot_maker": 0.0005,
+    "futures_taker": 0.0006,
+    "futures_maker": 0.0002,
+}
+
+
+def run(args):
+    csv_path = Path(args.data)
+    if not csv_path.exists():
+        print(f"ERROR: data file not found: {csv_path}")
+        sys.exit(1)
+
+    bars = load_csv(csv_path)
+    n = len(bars["close"])
+    days = (bars["ts"][-1] - bars["ts"][0]) / 86400
+    print(f"Loaded {n} bars ({days:.1f} days)")
+
+    cache = precompute_indicators(bars)
+    regime = cache["regime"]
+
+    # Parse strategies
+    strategies = [s.strip() for s in args.strategies.split(",")]
+    for s in strategies:
+        if s not in ALL_STRATEGIES:
+            print(f"ERROR: unknown strategy '{s}'"); sys.exit(1)
+
+    # Parse leverages
+    leverages = [int(x.strip()) for x in args.leverages.split(",")]
+
+    # Parse short modes
+    short_modes = [x.strip() == "True" for x in args.short_modes.split(",")]
+
+    # Parse fee modes
+    fee_modes = [x.strip() for x in args.fee_modes.split(",")]
+    for fm in fee_modes:
+        if fm not in FEE_MODES:
+            print(f"ERROR: unknown fee mode '{fm}'. Choose: {list(FEE_MODES.keys())}"); sys.exit(1)
+
+    # Count total combos
+    total_combos = 0
+    strat_combo_counts = {}
+    for s in strategies:
+        count = sum(1 for _ in GRID_FUNCS[s]())
+        strat_combo_counts[s] = count
+        total_combos += count
+    total_combos *= len(leverages) * len(short_modes) * len(fee_modes)
+    print(f"Strategy combos: {sum(strat_combo_counts.values()):,}")
+    print(f"Leverages: {leverages}")
+    print(f"Short modes: {short_modes}")
+    print(f"Fee modes: {fee_modes}")
+    print(f"Total combos: {total_combos:,}")
+
+    # Run sweep
+    results = []
+    t0 = time.time(); last_print = t0; combo_idx = 0
+
+    for fee_mode_name in fee_modes:
+        fee_pct = FEE_MODES[fee_mode_name]
+        for lev in leverages:
+            for allow_short in short_modes:
+                short_label = "SHORT" if allow_short else "LONG_ONLY"
+                print(f"\n=== fee={fee_mode_name} lev={lev}x {short_label} ===")
+
+                for strategy_name in strategies:
+                    grid_fn = GRID_FUNCS[strategy_name]
+                    for params in grid_fn():
+                        combo_idx += 1
+                        buy, sell, warmup, max_bars = build_signals_for_combo(params, cache, bars)
+
+                        rets, eq_curve, wins, mdd, rstats = simulate_short_leverage(
+                            bars, buy, sell, regime,
+                            start_equity=args.start_equity,
+                            risk_pct=params["risk_pct"],
+                            stop_loss_pct=params["stop_loss_pct"],
+                            rr=params["rr"],
+                            trail_activate_pct=params["trail_activate_pct"],
+                            trail_pct=params["trail_pct"],
+                            breakeven_activate_pct=params["breakeven_activate_pct"],
+                            min_profit_hold_pct=params["min_profit_hold_pct"],
+                            fee_pct=fee_pct,
+                            micro_account_threshold=200.0,
+                            confidence_floor=0.6,
+                            asset_multiplier=0.80,
+                            min_notional=5.0 if lev == 1 else 1.0,
+                            warmup=warmup,
+                            max_bars_in_trade=max_bars,
+                            allow_short=allow_short,
+                            leverage=lev,
+                            maint_margin_rate=0.004,
+                            funding_rate_daily=0.0003,
+                            regime_short_mode="bear_only",
+                        )
+
+                        n_trades = len(rets); n_wins = sum(wins)
+                        wr = (n_wins / n_trades) if n_trades else 0.0
+                        final_eq = eq_curve[-1]
+                        net_ret = (final_eq / args.start_equity - 1.0) * 100.0
+
+                        if rets:
+                            wins_arr = np.array([r for r in rets if r > 0])
+                            losses_arr = np.array([r for r in rets if r <= 0])
+                            gw = wins_arr.sum() if wins_arr.size else 0.0
+                            gl = -losses_arr.sum() if losses_arr.size else 0.0
+                            pf = (gw / gl) if gl > 0 else (float("inf") if gw > 0 else 0.0)
+                            aw = wins_arr.mean() if wins_arr.size else 0.0
+                            al = losses_arr.mean() if losses_arr.size else 0.0
+                            mu = float(np.mean(rets)); sd = float(np.std(rets)) or 1e-9
+                            sharpe_like = (mu / sd) * math.sqrt(max(n_trades, 1))
+                        else:
+                            pf = 0.0; aw = 0.0; al = 0.0; sharpe_like = 0.0
+
+                        common_keys = {"strategy", "risk_pct", "stop_loss_pct", "rr",
+                                       "trail_activate_pct", "trail_pct", "breakeven_activate_pct",
+                                       "min_profit_hold_pct"}
+                        sp = {k: v for k, v in params.items() if k not in common_keys}
+
+                        results.append(Result(
+                            strategy=strategy_name,
+                            risk_pct=params["risk_pct"], stop_loss_pct=params["stop_loss_pct"],
+                            rr=params["rr"], trail_activate_pct=params["trail_activate_pct"],
+                            trail_pct=params["trail_pct"],
+                            breakeven_activate_pct=params["breakeven_activate_pct"],
+                            min_profit_hold_pct=params["min_profit_hold_pct"],
+                            strategy_params=json.dumps(sp),
+                            allow_short=allow_short, leverage=lev,
+                            regime_short_mode="bear_only",
+                            fee_mode=fee_mode_name,
+                            trades=n_trades, wins=n_wins, win_rate=wr,
+                            final_equity=final_eq, net_return_pct=net_ret,
+                            max_drawdown_pct=mdd, profit_factor=pf if math.isfinite(pf) else 999.0,
+                            avg_win_pct=aw, avg_loss_pct=al, sharpe_like=sharpe_like,
+                            bull_trades=rstats["bull_trades"], bear_trades=rstats["bear_trades"],
+                            range_trades=rstats["range_trades"],
+                            bull_pnl_pct=rstats["bull_pnl_pct"], bear_pnl_pct=rstats["bear_pnl_pct"],
+                            range_pnl_pct=rstats["range_pnl_pct"],
+                            long_trades=rstats["long_trades"], short_trades=rstats["short_trades"],
+                            long_pnl_pct=rstats["long_pnl_pct"], short_pnl_pct=rstats["short_pnl_pct"],
+                            liquidations=rstats["liquidations"],
+                            days=days,
+                        ))
+
+                        if time.time() - last_print > 10:
+                            done = combo_idx
+                            elapsed = time.time() - t0
+                            rate = done / elapsed if elapsed > 0 else 0
+                            eta = (total_combos - done) / rate if rate > 0 else 0
+                            print(f"  {done:,}/{total_combos:,} ({rate:.0f}/s) ETA {eta:.0f}s")
+                            last_print = time.time()
+
+    elapsed = time.time() - t0
+    print(f"\nDone. {len(results):,} combos in {elapsed:.1f}s ({len(results)/elapsed:.0f}/s)")
+
+    # Save JSON
+    out_json = Path("docs/research/short_leverage_sweep_1d.json")
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    def _scrub(v):
+        if isinstance(v, np.generic): v = v.item()
+        if isinstance(v, float):
+            if math.isnan(v) or math.isinf(v): return None
+        return v
+    payload = {
+        "data_file": str(csv_path), "bars": n, "days": days,
+        "start_equity": args.start_equity,
+        "fee_modes_tested": fee_modes,
+        "leverages_tested": leverages,
+        "short_modes_tested": [str(s) for s in short_modes],
+        "n_combos": len(results),
+        "results": [{k: _scrub(v) for k, v in asdict(r).items()} for r in results],
+    }
+    with out_json.open("w") as f:
+        json.dump(payload, f)
+    print(f"  raw -> {out_json}")
+
+    # Generate report
+    generate_report(results, days, args)
+
+
+# =========================================================================== #
+# Report generation
+# =========================================================================== #
+def generate_report(results, days, args):
+    out_md = Path("docs/research/SHORT_LEVERAGE_SWEEP_1D.md")
+    min_trades = 8
+    qualified = [r for r in results if r.trades >= min_trades]
+
+    lines = []
+    lines.append("# Short + Leverage Mega Sweep — 5-Year BTC/USDT Daily")
+    lines.append("")
+    lines.append(f"- **Data**: `{args.data}` ({days:.1f} days, ~5 years)")
+    lines.append(f"- **Start equity**: ${args.start_equity:.2f}")
+    lines.append(f"- **Leverages tested**: {args.leverages}")
+    lines.append(f"- **Short modes**: {args.short_modes}")
+    lines.append(f"- **Fee modes**: {args.fee_modes}")
+    lines.append(f"- **Total combos**: {len(results):,}")
+    lines.append(f"- **Qualified (>={min_trades} trades)**: {len(qualified):,}")
+    n_profit = sum(1 for r in qualified if r.net_return_pct > 0)
+    pct_profit = (n_profit / len(qualified) * 100) if qualified else 0.0
+    lines.append(f"- **Profitable (net > 0)**: {n_profit:,} ({pct_profit:.1f}%)")
+    lines.append("")
+
+    # ---- 1. Executive Summary: leverage × short × fee ----
+    lines.append("## 1. Executive Summary: Leverage × Short × Fee")
+    lines.append("")
+    lines.append("| Leverage | Short | Fee Mode | Combos | Profitable | Profit% | Best Net% | Avg Net% | Avg MaxDD% | Liquidations |")
+    lines.append("|:--------:|:-----:|:--------:|-------:|:----------:|:-------:|:--------:|:--------:|:----------:|:------------:|")
+    for lev in sorted(set(r.leverage for r in results)):
+        for allow_short in [False, True]:
+            for fm in sorted(set(r.fee_mode for r in results)):
+                subset = [r for r in qualified if r.leverage == lev and r.allow_short == allow_short and r.fee_mode == fm]
+                if not subset: continue
+                n_prof = sum(1 for r in subset if r.net_return_pct > 0)
+                pct = n_prof / len(subset) * 100
+                best = max(r.net_return_pct for r in subset)
+                avg_net = np.mean([r.net_return_pct for r in subset])
+                avg_dd = np.mean([r.max_drawdown_pct for r in subset])
+                total_liq = sum(r.liquidations for r in subset)
+                short_label = "YES" if allow_short else "no"
+                lines.append(f"| {lev}x | {short_label} | {fm} | {len(subset):,} | {n_prof:,} | {pct:.1f} | {best:+.1f} | {avg_net:+.1f} | {avg_dd:.1f} | {total_liq:,} |")
+    lines.append("")
+
+    # ---- 2. Short vs Long comparison ----
+    lines.append("## 2. Short vs Long-Only Comparison (same params)")
+    lines.append("")
+    lines.append("For each (strategy, risk, SL, leverage, fee), compare allow_short=False vs True:")
+    lines.append("")
+    lines.append("| Metric | Long-Only | Short Enabled | Delta |")
+    lines.append("|--------|:---------:|:-------------:|:-----:|")
+    # Aggregate comparison
+    lo = [r for r in qualified if not r.allow_short]
+    sh = [r for r in qualified if r.allow_short]
+    if lo and sh:
+        lo_avg_net = np.mean([r.net_return_pct for r in lo])
+        sh_avg_net = np.mean([r.net_return_pct for r in sh])
+        lo_avg_wr = np.mean([r.win_rate for r in lo])
+        sh_avg_wr = np.mean([r.win_rate for r in sh])
+        lo_avg_dd = np.mean([r.max_drawdown_pct for r in lo])
+        sh_avg_dd = np.mean([r.max_drawdown_pct for r in sh])
+        lo_best = max(r.net_return_pct for r in lo)
+        sh_best = max(r.net_return_pct for r in sh)
+        lo_liq = sum(r.liquidations for r in lo)
+        sh_liq = sum(r.liquidations for r in sh)
+        lines.append(f"| Avg Net% | {lo_avg_net:+.1f} | {sh_avg_net:+.1f} | {sh_avg_net - lo_avg_net:+.1f} |")
+        lines.append(f"| Best Net% | {lo_best:+.1f} | {sh_best:+.1f} | {sh_best - lo_best:+.1f} |")
+        lines.append(f"| Avg Win Rate | {lo_avg_wr*100:.1f}% | {sh_avg_wr*100:.1f}% | {(sh_avg_wr - lo_avg_wr)*100:+.1f}% |")
+        lines.append(f"| Avg MaxDD% | {lo_avg_dd:.1f} | {sh_avg_dd:.1f} | {sh_avg_dd - lo_avg_dd:+.1f} |")
+        lines.append(f"| Total Liquidations | {lo_liq:,} | {sh_liq:,} | {sh_liq - lo_liq:+,} |")
+    lines.append("")
+
+    # ---- 3. Per-leverage breakdown ----
+    lines.append("## 3. Per-Leverage Breakdown")
+    lines.append("")
+    lines.append("| Leverage | Combos | Profitable | Profit% | Best Net% | Worst Net% | Avg Net% | Avg MaxDD% | Avg Liquidations |")
+    lines.append("|:--------:|-------:|:----------:|:-------:|:---------:|:----------:|:--------:|:----------:|:----------------:|")
+    for lev in sorted(set(r.leverage for r in results)):
+        subset = [r for r in qualified if r.leverage == lev]
+        if not subset: continue
+        n_prof = sum(1 for r in subset if r.net_return_pct > 0)
+        pct = n_prof / len(subset) * 100
+        best = max(r.net_return_pct for r in subset)
+        worst = min(r.net_return_pct for r in subset)
+        avg_net = np.mean([r.net_return_pct for r in subset])
+        avg_dd = np.mean([r.max_drawdown_pct for r in subset])
+        avg_liq = np.mean([r.liquidations for r in subset])
+        lines.append(f"| {lev}x | {len(subset):,} | {n_prof:,} | {pct:.1f} | {best:+.1f} | {worst:+.1f} | {avg_net:+.1f} | {avg_dd:.1f} | {avg_liq:.2f} |")
+    lines.append("")
+
+    # ---- 4. Regime analysis with shorts ----
+    lines.append("## 4. Regime Analysis with Shorts")
+    lines.append("")
+    for allow_short_label, allow_short_val in [("LONG-ONLY", False), ("SHORT ENABLED", True)]:
+        lines.append(f"### {allow_short_label}")
+        lines.append("")
+        lines.append("| Strategy | Bull Avg PnL/trade | Bear Avg PnL/trade | Range Avg PnL/trade | Short Trades | Short PnL% | Long PnL% |")
+        lines.append("|----------|:------------------:|:------------------:|:-------------------:|:------------:|:----------:|:----------:|")
+        for s in sorted(set(r.strategy for r in qualified)):
+            subset = [r for r in qualified if r.strategy == s and r.allow_short == allow_short_val]
+            if not subset: continue
+            bull_t = sum(r.bull_trades for r in subset)
+            bear_t = sum(r.bear_trades for r in subset)
+            range_t = sum(r.range_trades for r in subset)
+            bull_pnl = sum(r.bull_pnl_pct for r in subset)
+            bear_pnl = sum(r.bear_pnl_pct for r in subset)
+            range_pnl = sum(r.range_pnl_pct for r in subset)
+            bull_avg = bull_pnl / bull_t if bull_t > 0 else 0
+            bear_avg = bear_pnl / bear_t if bear_t > 0 else 0
+            range_avg = range_pnl / range_t if range_t > 0 else 0
+            short_t = sum(r.short_trades for r in subset)
+            short_pnl = sum(r.short_pnl_pct for r in subset)
+            long_pnl = sum(r.long_pnl_pct for r in subset)
+            lines.append(f"| {s} | {bull_avg:+.3f} | {bear_avg:+.3f} | {range_avg:+.3f} | {short_t:,} | {short_pnl:+.1f} | {long_pnl:+.1f} |")
+        lines.append("")
+
+    # ---- 5. Liquidation analysis ----
+    lines.append("## 5. Liquidation Analysis")
+    lines.append("")
+    lines.append("| Leverage | Combos w/ Liquidations | Avg Liquidations | Max Liquidations | Avg Net% (w/ liq) | Avg Net% (no liq) |")
+    lines.append("|:--------:|:---------------------:|:----------------:|:----------------:|:-----------------:|:-----------------:|")
+    for lev in sorted(set(r.leverage for r in results)):
+        subset = [r for r in qualified if r.leverage == lev]
+        if not subset: continue
+        with_liq = [r for r in subset if r.liquidations > 0]
+        without_liq = [r for r in subset if r.liquidations == 0]
+        n_with = len(with_liq)
+        avg_liq = np.mean([r.liquidations for r in subset])
+        max_liq = max(r.liquidations for r in subset)
+        avg_net_with = np.mean([r.net_return_pct for r in with_liq]) if with_liq else 0
+        avg_net_without = np.mean([r.net_return_pct for r in without_liq]) if without_liq else 0
+        lines.append(f"| {lev}x | {n_with:,} | {avg_liq:.2f} | {max_liq} | {avg_net_with:+.1f} | {avg_net_without:+.1f} |")
+    lines.append("")
+
+    # ---- 6. Top 20 overall ----
+    all_qual = sorted(qualified, key=lambda r: r.net_return_pct - 0.5 * r.max_drawdown_pct, reverse=True)
+    lines.append("## 6. Top 20 Overall Configs")
+    lines.append("")
+    lines.append("| # | Strategy | Lev | Short | Fee | Risk% | SL% | R:R | Trades | WR | Net% | MaxDD% | PF | Liq | L/S PnL | Bull/Bear/Range |")
+    lines.append("|---|----------|:---:|:-----:|:---:|------:|----:|----:|-------:|---:|-----:|-------:|---:|:---:|:-------:|:--------------:|")
+    for i, r in enumerate(all_qual[:20], 1):
+        short_label = "Y" if r.allow_short else "-"
+        ls_pnl = f"{r.long_pnl_pct:+.0f}/{r.short_pnl_pct:+.0f}"
+        lines.append(
+            f"| {i} | {r.strategy} | {r.leverage}x | {short_label} | {r.fee_mode} "
+            f"| {r.risk_pct*100:.2f} | {r.stop_loss_pct:.1f} | {r.rr:.1f} "
+            f"| {r.trades} | {r.win_rate*100:.0f}% "
+            f"| {r.net_return_pct:+.1f} | {r.max_drawdown_pct:.1f} "
+            f"| {r.profit_factor:.2f} | {r.liquidations} "
+            f"| {ls_pnl} "
+            f"| {r.bull_trades}/{r.bear_trades}/{r.range_trades} |"
+        )
+    lines.append("")
+
+    # ---- 7. Account threshold recommendation ----
+    lines.append("## 7. Account Threshold Recommendations")
+    lines.append("")
+    lines.append("Based on liquidation and drawdown analysis across leverage levels:")
+    lines.append("")
+    # Find best config for each leverage level with short enabled
+    for lev in sorted(set(r.leverage for r in results)):
+        sh_subset = [r for r in qualified if r.leverage == lev and r.allow_short]
+        if not sh_subset: continue
+        best = max(sh_subset, key=lambda r: r.net_return_pct - 0.5 * r.max_drawdown_pct)
+        min_equity = 5.0 * lev  # rough minimum: need at least lev * $5 for 1 contract margin
+        lines.append(f"### {lev}x Leverage")
+        lines.append(f"- Best config: {best.strategy} risk={best.risk_pct*100:.2f}% SL={best.stop_loss_pct:.1f}%")
+        lines.append(f"- Net: {best.net_return_pct:+.1f}%, MaxDD: {best.max_drawdown_pct:.1f}%, Liquidations: {best.liquidations}")
+        lines.append(f"- Short trades: {best.short_trades}, Short PnL: {best.short_pnl_pct:+.1f}%")
+        lines.append(f"- Recommended minimum equity: ${min_equity:.0f}")
+        lines.append("")
+
+    # ---- Footer ----
+    lines.append("---")
+    lines.append("")
+    lines.append("_Generated by `scripts/research/run_short_leverage_sweep.py`._")
+    lines.append(f"_Strategies: {args.strategies}_")
+    lines.append(f"_Leverages: {args.leverages}_")
+    lines.append(f"_Short modes: {args.short_modes}_")
+    lines.append(f"_Fee modes: {args.fee_modes}_")
+    lines.append("_KuCoin USDT-M futures: 0.02% maker / 0.06% taker, 0.4% maint margin, avg 0.03%/day funding._")
+    lines.append("_Regime: BULL (close > EMA200 + slope > 0), BEAR (close < EMA200 + slope < 0), RANGE (else)._")
+    lines.append("_IMPORTANT: This uses REAL KuCoin 5-year OHLCV data on DAILY timeframe._")
+    lines.append("_Short positions are regime-aware: SHORT in BEAR, LONG in BULL/RANGE._")
+    lines.append("_Leverage applies to both long and short positions; liquidation checked each bar._")
+    lines.append("")
+
+    out_md.write_text("\n".join(lines))
+    print(f"  report -> {out_md}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Short + Leverage Mega Sweep on 1d data")
+    ap.add_argument("--data", default="data/btc_usdt_1d.csv")
+    ap.add_argument("--start-equity", type=float, default=110.0)
+    ap.add_argument("--top", type=int, default=5)
+    ap.add_argument("--strategies", default="vol_breakout,supertrend,rsi,bb,williams,macd")
+    ap.add_argument("--leverages", default="1,2,3,5,10,20")
+    ap.add_argument("--short-modes", default="False,True")
+    ap.add_argument("--fee-modes", default="futures_taker,futures_maker")
+    args = ap.parse_args()
+    run(args)
+
+
+if __name__ == "__main__":
+    main()

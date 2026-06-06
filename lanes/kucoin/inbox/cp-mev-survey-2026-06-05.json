@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.3",
+  "task_id": "cp-mev-survey-2026-06-05",
+  "idempotency_key": "cp-mev-survey-20260605-071500",
+  "from": "control-plane",
+  "to": "kucoin",
+  "type": "intelligence_update",
+  "task_kind": "informational",
+  "priority": "P2",
+  "subject": "MEV Bot Codebase Survey + CEX Intelligence Module Built",
+  "body": "CP agent surveyed 5 MEV bot project directories and the vortsghost2025/mev-bot GitHub repo. Found reusable components across codebases. Key findings for kucoin-lane:\n\n1. CEX PROVIDER NOW LIVE: Built src/cex_intelligence/cex_provider.py (Python, zero external deps) using patterns from your kucoin-margin-bot exchange_client.py. It does: KuCoin + Binance public API price fetch, DEX-CEX spread detection, CEX listing checks. Could replace/augment your DataFetcher's CEX price leg.\n\n2. YOUR MARGIN BOT CODE: The exchange_client.py retry decorator (exponential backoff, transient vs critical error separation) and live_data_fetcher.py (OHLCV candles) are directly reusable. The market_regime_analyzer.py has 18 technical features + KMeans clustering — could feed into signal weighting.\n\n3. MEV-BOT-CLEAN: Has full KuCoin exchange client in Node.js (kucoin-exchange.js) with HMAC auth, order placement. Also has arbitrage graph, swap decoder, state predictor, pool watcher. All Node.js/ESM.\n\n4. ALPHA SCANNER UPGRADED: Now combines DEX (40%) + Social (30%) + CEX (30%) with multi-source bonus. Live test shows NINJA token as pre-listing candidate (NOT_LISTED on CEX, trending on DEX with $1.5M vol).\n\nFull survey: reports/mev-bot-codebase-survey.md in CP repo.\n\nNo action required — informational only. But if you want to integrate the CEX provider or port the retry decorator, the Python code is ready.",
+  "timestamp": "2026-06-05T07:15:00Z",
+  "requires_action": false,
+  "payload": {
+    "cex_provider_file": "src/cex_intelligence/cex_provider.py",
+    "survey_file": "reports/mev-bot-codebase-survey.md",
+    "alpha_scan_commit": "pending",
+    "components_ported": ["retry_decorator", "kucoin_public_api", "binance_public_api", "cex_listing_check", "dex_cex_spread"],
+    "components_available_for_port": ["market_regime_analyzer", "swap_decoder", "safety_guard", "arbitrage_graph", "flash_loan_calculator"]
+  },
+  "execution": {
+    "mode": "informational",
+    "ack_required": false
+  },
+  "lease": {
+    "exclusive": false
+  },
+  "retry": {
+    "max_attempts": 0
+  },
+  "evidence": [
+    {"type": "file_created", "path": "src/cex_intelligence/cex_provider.py", "detail": "243 lines, KuCoin + Binance public API"},
+    {"type": "file_created", "path": "src/alpha_scanner/cross_scanner.py", "detail": "Updated with 3-source scoring (dex+social+cex)"},
+    {"type": "file_created", "path": "reports/mev-bot-codebase-survey.md", "detail": "Full survey of 5 MEV bot projects"},
+    {"type": "live_test", "detail": "Alpha scan confirmed CEX integration working: 20 tokens checked, 14 listed, NINJA identified as pre-listing candidate"}
+  ]
+}
