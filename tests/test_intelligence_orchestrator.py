@@ -36,8 +36,6 @@ class TestIntelligenceOrchestrator:
                     "enable_regime": False,
                     "enable_lead_lag": False,
                     "enable_whale": False,
-                    "enable_dex_lag": False,
-                    "enable_creator_tracking": False,
                     "paper_trading": True,
                 }
             )
@@ -48,8 +46,6 @@ class TestIntelligenceOrchestrator:
             "regime": False,
             "lead_lag": False,
             "whale": False,
-            "dex_cex_lag": False,
-            "creator_tracking": False,
         }
         assert orchestrator.current_stage == WorkflowStage.IDLE
         assert orchestrator.trading_paused is False
@@ -314,8 +310,8 @@ class TestIntelligenceOrchestrator:
         )
         assert mult == 0.5
 
-    def test_run_cycle_dex_cex_lag_integration(self, tmp_path):
-        """Full cycle integration test with DEX→CEX lag detection enabled."""
+    def test_run_cycle_dex_cex_lag_removed(self, tmp_path):
+        """Verify DEX→CEX lag module is no longer part of the orchestrator."""
         cb_state_file = str(tmp_path / "cb_state.json")
         portfolio_cb_file = str(tmp_path / "portfolio_cb_state.json")
         with patch.dict(
@@ -330,103 +326,10 @@ class TestIntelligenceOrchestrator:
                     "enable_regime": False,
                     "enable_lead_lag": False,
                     "enable_whale": False,
-                    "enable_dex_lag": True,
-                    "dex_lag_window_days": 30,
-                    "dex_lag_min_composite": 0.4,
                     "paper_trading": True,
                 }
             )
 
-        # Verify detector is initialized
-        assert orch.dex_cex_lag is not None
-        assert orch.enabled_modules["dex_cex_lag"] is True
-
-        # Register mock agents needed for workflow
-        mock_data_fetcher = MockAgent("DataFetchingAgent")
-        mock_data_fetcher.execute_return = {
-            "success": True,
-            "data": {
-                "market_data": {
-                    "BTC/USDT": {"current_price": 50500.0, "volume": 100},
-                    "ETH/USDT": {"current_price": 3050.0, "volume": 200},
-                }
-            }
-        }
-        orch.register_agent(mock_data_fetcher)
-
-        mock_market_analyzer = MockAgent("MarketAnalysisAgent")
-        mock_market_analyzer.execute_return = {
-            "success": True,
-            "data": {
-                "analysis": {
-                    "BTC/USDT": {"signal_strength": 0.5, "regime": "bullish"},
-                    "ETH/USDT": {"signal_strength": 0.3, "regime": "neutral"},
-                },
-                "regime": "bullish"
-            }
-        }
-        orch.register_agent(mock_market_analyzer)
-
-        mock_backtest_agent = MockAgent("BacktestingAgent")
-        mock_backtest_agent.execute_return = {"success": True, "data": {"backtest_results": {}}}
-        orch.register_agent(mock_backtest_agent)
-
-        mock_risk_agent = MockAgent("RiskManagementAgent")
-        mock_risk_agent.execute_return = {"success": True, "data": {"assessments": {}, "position_approved": True}}
-        orch.register_agent(mock_risk_agent)
-
-        mock_exec_agent = MockAgent("ExecutionAgent")
-        mock_exec_agent.execute_return = {"success": True, "data": {"orders": [], "trade_executed": False}}
-        orch.register_agent(mock_exec_agent)
-
-        # Mock _klines_fetcher.fetch_klines (used in execute before data fetching agent)
-        with patch.object(orch, "_klines_fetcher") as mock_fetcher:
-            mock_fetcher.fetch_klines.side_effect = lambda adapter, symbol: pd.DataFrame(
-                {
-                    "open": [50000] * 20,
-                    "high": [51000] * 20,
-                    "low": [49000] * 20,
-                    "close": [50500] * 20,
-                    "volume": [100] * 20,
-                }
-            ) if symbol == "BTC/USDT" else pd.DataFrame(
-                {
-                    "open": [3000] * 20,
-                    "high": [3100] * 20,
-                    "low": [2900] * 20,
-                    "close": [3050] * 20,
-                    "volume": [200] * 20,
-                }
-            )
-
-            # Mock dex_intelligence.execute if it exists
-            if orch.dex_intelligence:
-                with patch.object(orch.dex_intelligence, "execute") as mock_dex_exec:
-                    mock_dex_exec.return_value = {"success": True, "dex_signals": []}
-                    # Mock DexToCexLagDetector.run
-                    with patch.object(orch.dex_cex_lag, "run") as mock_lag_run:
-                        mock_lag_run.return_value = [
-                            {
-                                "base_token": "BTC",
-                                "lead_lag_signal": "OPPORTUNITY",
-                                "confidence": 0.75,
-                                "composite_score": 0.8,
-                                "lag_days": 5,
-                                "dex_pair": "BTC/USDT",
-                            }
-                        ]
-                        # Run full cycle
-                        result = orch.execute(["BTC/USDT", "ETH/USDT"])
-
-        # Verify cycle completed successfully
-        assert result is not None
-        assert result.get("success") is True
-        
-        # Verify dex_cex_lag.run was called and returned expected signals
-        mock_lag_run.assert_called_once()
-        
-        # Verify the mock lag signal was returned by the detector
-        lag_result = mock_lag_run.return_value
-        assert len(lag_result) == 1
-        assert lag_result[0]["lead_lag_signal"] == "OPPORTUNITY"
-        assert lag_result[0]["base_token"] == "BTC"
+        assert not hasattr(orch, "dex_cex_lag") or orch.dex_cex_lag is None
+        assert "dex_cex_lag" not in orch.enabled_modules
+        assert "creator_tracking" not in orch.enabled_modules
