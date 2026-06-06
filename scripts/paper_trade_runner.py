@@ -64,8 +64,8 @@ def parse_args():
     parser.add_argument(
         "--risk-pct",
         type=float,
-        default=0.01,
-        help="Risk per trade as fraction of balance (default: 0.01 = 1%%)",
+    default=0.02,
+    help="Risk per trade as fraction of balance (default: 0.02 = 2%%)",
     )
     parser.add_argument(
         "--bars",
@@ -346,18 +346,19 @@ def run_simulation(args):
                     intel_action = "HOLD"
                     intel_confidence = 0.5
                     intel_multiplier = 0.5
-            elif regime_result and regime_result.get("recommendation") == "SHORT_TREND":
-                if spot_long_only:
-                        intel_action = "HOLD"
-                        intel_confidence = regime_result.get("confidence", 0.5)
-                        intel_multiplier = 0.0
-                    else:
-                        intel_action = "SELL"
-                        intel_confidence = regime_result.get("confidence", 0.5)
-                        intel_multiplier = regime_detector.get_position_multiplier(regime_result)
             except Exception as e:
                 if args.verbose:
                     logger.debug(f"  Intelligence analysis failed: {e}")
+        if regime_result and regime_result.get("recommendation") == "SHORT_TREND":
+            if spot_long_only:
+                intel_action = "HOLD"
+                intel_confidence = regime_result.get("confidence", 0.5)
+                intel_multiplier = 0.0
+            else:
+                intel_action = "SELL"
+                intel_confidence = regime_result.get("confidence", 0.5)
+                intel_multiplier = regime_detector.get_position_multiplier(regime_result)
+
 
             if intel_action == "EXIT_ALL":
                 if args.verbose:
@@ -400,7 +401,10 @@ def run_simulation(args):
                 continue
 
             if adx_regime_raw == "TRENDING_DOWN" and recommendation == "HOLD":
-                recommendation = "SELL"
+                if spot_long_only:
+                    recommendation = "HOLD"
+                else:
+                    recommendation = "SELL"
                 signal_strength = max(signal_strength, adx_confidence * 0.7, 0.50)
                 pair_analysis["recommendation"] = recommendation
                 pair_analysis["signal_strength"] = signal_strength
@@ -445,6 +449,8 @@ def run_simulation(args):
 
             risk_manager.update_account_balance(running_balance)
             risk_result = risk_manager.execute(risk_input)
+            if spot_long_only and recommendation == "SELL":
+                continue
             if not risk_result.get("success"):
                 continue
 
@@ -460,7 +466,7 @@ def run_simulation(args):
                     logger.info(f"  [BAR {bar_idx}] {pair}: REJECTED — {reason}")
                 continue
 
-            direction = "long" if recommendation == "BUY" else "short"
+            direction = "long" if (recommendation == "BUY" or spot_long_only) else "short"
             trade_id = ledger.open_trade(
                 pair=pair,
                 direction=direction,

@@ -303,16 +303,17 @@ class TestOrchestratorIntegration:
         assert orch.strategy is None
         assert orch.strategy_name == "rsi_regime"
 
-    def test_orchestrator_default_no_strategy(self):
-        """Orchestrator without strategy config should default to rsi_regime."""
-        from src.intelligence.orchestrator import IntelligenceOrchestrator
+def test_orchestrator_default_no_strategy(monkeypatch):
+    """Orchestrator without strategy config should default to rsi_regime."""
+    monkeypatch.delenv("STRATEGY", raising=False)
+    from src.intelligence.orchestrator import IntelligenceOrchestrator
 
-        config = {
-            "enable_regime": False,
-            "enable_lead_lag": False,
-            "enable_whale": False,
-            "account_balance": 110,
-        }
-        orch = IntelligenceOrchestrator(config)
-        assert orch.strategy is None
-        assert orch.strategy_name == "rsi_regime"
+    config = {
+        "enable_regime": False,
+        "enable_lead_lag": False,
+        "enable_whale": False,
+        "account_balance": 110,
+    }
+    orch = IntelligenceOrchestrator(config)
+    assert orch.strategy is None
+    assert orch.strategy_name == "rsi_regime"
