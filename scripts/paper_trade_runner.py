@@ -346,8 +346,8 @@ def run_simulation(args):
                     intel_action = "HOLD"
                     intel_confidence = 0.5
                     intel_multiplier = 0.5
-            elif regime_result and regime_result.get("recommendation") == "SHORT_TREND":
-                if spot_long_only:
+                elif regime_result and regime_result.get("recommendation") == "SHORT_TREND":
+                    if spot_long_only:
                         intel_action = "HOLD"
                         intel_confidence = regime_result.get("confidence", 0.5)
                         intel_multiplier = 0.0
@@ -400,13 +400,14 @@ def run_simulation(args):
                 continue
 
             if adx_regime_raw == "TRENDING_DOWN" and recommendation == "HOLD":
-                recommendation = "SELL"
-                signal_strength = max(signal_strength, adx_confidence * 0.7, 0.50)
-                pair_analysis["recommendation"] = recommendation
-                pair_analysis["signal_strength"] = signal_strength
+                if not spot_long_only:
+                    recommendation = "SELL"
+                    signal_strength = max(signal_strength, adx_confidence * 0.7, 0.50)
+                    pair_analysis["recommendation"] = recommendation
+                    pair_analysis["signal_strength"] = signal_strength
                 if args.verbose:
                     logger.info(
-                        f"  [BAR {bar_idx}] {pair}: TREND SHORT — ADX downtrend override "
+                        f"  [BAR {bar_idx}] {pair}: TREND_DOWN {'' if spot_long_only else 'SHORT — ADX downtrend override '} "
                         f"(ADX={adx_value:.1f}, confidence={adx_confidence:.2f}) "
                         f"signal_strength={signal_strength:.3f}"
                     )
@@ -458,6 +459,11 @@ def run_simulation(args):
                 if args.verbose:
                     reason = risk_data.get("rejection_reason", "unknown")
                     logger.info(f"  [BAR {bar_idx}] {pair}: REJECTED — {reason}")
+                continue
+
+            if spot_long_only and recommendation == "SELL":
+                if args.verbose:
+                    logger.info(f"  [BAR {bar_idx}] {pair}: SKIP — SELL blocked by spot_long_only")
                 continue
 
             direction = "long" if recommendation == "BUY" else "short"
