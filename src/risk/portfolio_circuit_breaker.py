@@ -25,12 +25,14 @@ class PortfolioCircuitBreaker:
         max_daily_loss_pct: float = 6.0,
         cooldown_minutes: int = 60,
         state_path: str = "portfolio_cb_state.json",
+        requires_manual_reset: bool = True,
     ) -> None:
         self.starting_equity = max(starting_equity, 0)
         self.max_drawdown_pct = max_drawdown_pct
         self.max_daily_loss_pct = max_daily_loss_pct
         self.cooldown_minutes = cooldown_minutes
         self.state_path = state_path
+        self.requires_manual_reset = requires_manual_reset
         self.session_start_equity: float = self.starting_equity
         self.equity_peak: float = self.starting_equity
         self.last_equity: float = self.starting_equity
@@ -73,6 +75,7 @@ class PortfolioCircuitBreaker:
             "tripped": self.tripped,
             "trip_reason": self.trip_reason,
             "trip_time": self.trip_time,
+            "requires_manual_reset": self.requires_manual_reset,
         }
         try:
             with open(self.state_path, "w") as f:
@@ -82,6 +85,10 @@ class PortfolioCircuitBreaker:
 
     def check(self, current_equity: float) -> None:
         if self.tripped:
+            if self.requires_manual_reset:
+                raise CircuitBreakTriggered(
+                    f"Portfolio CB TRIPPED (manual reset required): {self.trip_reason}"
+                )
             if (
                 self.trip_time
                 and time.time() - self.trip_time > self.cooldown_minutes * 60

@@ -24,11 +24,13 @@ class CircuitBreaker:
         time_window_minutes: int = 60,
         check_interval_seconds: int = 300,
         name: str = "CircuitBreaker",
+        requires_manual_reset: bool = True,
     ):
         self.loss_threshold_pct = loss_threshold_pct
         self.time_window_minutes = time_window_minutes
         self.check_interval_seconds = check_interval_seconds
         self.name = name
+        self.requires_manual_reset = requires_manual_reset
 
         self.pnl_history = deque()
         self.last_check_time = 0
@@ -48,6 +50,13 @@ class CircuitBreaker:
         self, current_pnl_usd: float, timestamp: Optional[float] = None
     ) -> Tuple[bool, str]:
         timestamp = timestamp or time.time()
+
+        if self.is_tripped and self.requires_manual_reset:
+            return (
+                False,
+                f"Circuit breaker TRIPPED (manual reset required): {self.trip_reason}",
+            )
+
         self.record_pnl(current_pnl_usd, timestamp)
 
         if timestamp - self.last_check_time < self.check_interval_seconds:
@@ -56,9 +65,32 @@ class CircuitBreaker:
         self.last_check_time = timestamp
 
         if len(self.pnl_history) < 2:
+            if self.is_tripped:
+                if self.requires_manual_reset:
+                    return (
+                        False,
+                        f"Circuit breaker TRIPPED (manual reset required): {self.trip_reason}",
+                    )
+                time_since_trip = timestamp - (self.trip_time or timestamp)
+                cooldown = self.time_window_minutes * 60 * 2
+                if time_since_trip < cooldown:
+                    return (
+                        False,
+                        f"Circuit breaker cooldown ({time_since_trip:.0f}/{cooldown:.0f}s)",
+                    )
+                self.is_tripped = False
+                self.trip_time = None
+                self.trip_reason = ""
+                logger.info(f"[{self.name}] Circuit breaker auto-reset after cooldown (insufficient data)")
+                return True, "Circuit breaker auto-reset after cooldown"
             return True, "Insufficient data for circuit check"
 
         if self.is_tripped:
+            if self.requires_manual_reset:
+                return (
+                    False,
+                    f"Circuit breaker TRIPPED (manual reset required): {self.trip_reason}",
+                )
             time_since_trip = timestamp - (self.trip_time or timestamp)
             cooldown = self.time_window_minutes * 60 * 2
             if time_since_trip < cooldown:
@@ -70,8 +102,8 @@ class CircuitBreaker:
             self.is_tripped = False
             self.trip_time = None
             self.trip_reason = ""
-            logger.info(f"[{self.name}] Circuit breaker reset after cooldown")
-            return True, "Circuit breaker reset after cooldown"
+            logger.info(f"[{self.name}] Circuit breaker auto-reset after cooldown")
+            return True, "Circuit breaker auto-reset after cooldown"
 
         oldest_pnl = self.pnl_history[0][1]
         pnl_drop = oldest_pnl - current_pnl_usd

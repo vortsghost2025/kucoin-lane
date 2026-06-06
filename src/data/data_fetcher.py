@@ -148,11 +148,15 @@ class DataFetchingAgent(BaseAgent):
     def _fetch_price_data(
         self, coingecko_id: str, vs_currency: str = "usd"
     ) -> Optional[Dict[str, Any]]:
+        from .multi_provider_client import DataIntegrityError
+
         try:
             data = fetch_simple_price(ids=[coingecko_id], vs_currency=vs_currency)
             if coingecko_id in data:
                 return data[coingecko_id]
             return None
+        except DataIntegrityError:
+            raise
         except Exception as e:
             self.logger.error(f"CoinGecko API error: {str(e)}")
             return None

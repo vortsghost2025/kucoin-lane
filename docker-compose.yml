@@ -1,3 +1,5 @@
+version: "3.8"
+
 services:
   kucoin-lane:
     build:
@@ -16,6 +18,9 @@ services:
       - TRADING_PAIRS=BTC/USDT
       - CANDLE_INTERVAL=1day
       - STRATEGY=vol_breakout
+      - CYCLE_INTERVAL=1
+      - PAPER_TRADING=true
+      - MODE=PAPER
     dns:
       - 1.1.1.1
       - 8.8.8.8
@@ -23,15 +28,17 @@ services:
       - ./state:/app/state
       - ./logs:/app/logs
       - ./agent-logs:/app/agent-logs
+      - ./src:/app/src
       - ./config/asset_profiles.json:/app/config/asset_profiles.json:ro
       - ../Archivist-Agent/lanes/kucoin:/app/lanes/kucoin
     ports:
       - "8084:8080"
     healthcheck:
-      test: ["CMD", "python", "-c", "import os, time; h='/app/state/heartbeat.json'; exit(0 if os.path.exists(h) and time.time()-os.path.getmtime(h)<300 else 1)"]
-      interval: 60s
+      test: ["CMD", "sh", "-c", "test -f /app/lanes/kucoin/inbox/SESSION_STATE.json"]
+      interval: 30s
       timeout: 10s
       retries: 3
+      start_period: 30s
     logging:
       driver: json-file
       options:

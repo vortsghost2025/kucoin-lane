@@ -23,6 +23,7 @@ class TestPortfolioCircuitBreaker:
             max_daily_loss_pct=6.0,
             cooldown_minutes=60,
             state_path=state_path,
+            requires_manual_reset=False,
         )
 
     def test_init(self, pcb):

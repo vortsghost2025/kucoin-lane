@@ -12,6 +12,7 @@ class TestCircuitBreaker:
             time_window_minutes=60,
             check_interval_seconds=0,
             name="TestCB",
+            requires_manual_reset=False,
         )
 
     def test_init(self, cb):
