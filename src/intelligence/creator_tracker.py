@@ -31,6 +31,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from ..base_agent import BaseAgent, AgentStatus
 from .chain.prelaunch_scanner import PreLaunchScanner, extract_social_links, compute_community_score, classify_pre_launch
 from .chain.safety_guard import SafetyGuard, RISK_TIERS
+from .chain.helius_provider import HeliusProvider
 from .social.scorer import SocialSignalScorer, SocialScore
 
 logger = logging.getLogger(__name__)
@@ -186,6 +187,7 @@ class CreatorTrackerAgent(BaseAgent):
         self.prelaunch_scanner = PreLaunchScanner(rpc_url=self.solana_rpc_url)
         self.safety_guard = SafetyGuard(rpc_url=self.solana_rpc_url)
         self.social_scorer = SocialSignalScorer()
+        self.helius = HeliusProvider()
 
         if self.solana_rpc_url and not self.solana_rpc_url.endswith("YOUR_HELIUS_API_KEY"):
             self.logger.info(f"Solana RPC configured: {self.solana_rpc_url[:50]}...")
@@ -253,6 +255,16 @@ class CreatorTrackerAgent(BaseAgent):
 
         for token_data in pumpfun_tokens:
             creator_id = token_data.get("creator", "unknown")
+            
+            # Resolve unknown creator via Helius
+            if (not creator_id or creator_id == "unknown") and token_data.get("mint"):
+                mint = token_data["mint"]
+                resolved = self.helius.get_mint_creator(mint)
+                if resolved:
+                    creator_id = resolved
+                    token_data["creator"] = creator_id
+                    self.logger.info(f"Resolved creator for {mint[:8]}...: {creator_id}")
+            
             if not creator_id or creator_id == "unknown":
                 continue
 

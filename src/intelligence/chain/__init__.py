@@ -7,12 +7,14 @@ so they integrate with the orchestrator and share the standard message format.
 from ...base_agent import BaseAgent, AgentStatus
 from .prelaunch_scanner import PreLaunchScanner, KNOWN_LAUNCH_COMMUNITIES
 from .safety_guard import SafetyGuard, RISK_TIERS, RED_FLAGS, SAFE_SIGNALS
+from .helius_provider import HeliusProvider
 
 __all__ = [
     "PreLaunchScannerAgent",
     "SafetyGuardAgent",
     "PreLaunchScanner",
     "SafetyGuard",
+    "HeliusProvider",
     "KNOWN_LAUNCH_COMMUNITIES",
     "RISK_TIERS",
     "RED_FLAGS",

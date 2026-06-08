@@ -28,6 +28,7 @@ from urllib.error import URLError, HTTPError
 
 from src.data.dex_intelligence.birdeye import BirdeyeProvider
 from src.data.dex_intelligence.dexscreener import DexScreenerProvider
+from src.intelligence.chain.helius_provider import HeliusProvider
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +162,7 @@ class PreLaunchScanner:
         self._creator_cache: Dict[str, Dict] = {}
         self.birdeye = BirdeyeProvider(chain="solana")
         self.dexscreener = DexScreenerProvider(chain="solana")
+        self.helius = HeliusProvider()
 
     def scan_pumpfun_new(self, limit: int = 50) -> List[Dict[str, Any]]:
         raw = _safe_get(f"{PUMPFUN_API}/coins?offset=0&limit={limit}&sort=new")
@@ -278,7 +280,33 @@ class PreLaunchScanner:
         
         return token_data
 
-    def scan_all_sources(self, limit: int = 50) -> List[Dict[str, Any]]:
+    def resolve_creators(self, tokens: List[Dict[str, Any]], delay: float = 0.1) -> Dict[str, Optional[str]]:
+        """Resolve creator wallets for tokens using Helius.
+        
+        Only resolves for tokens that don't already have a creator.
+        Returns dict mapping mint -> creator wallet (or None).
+        """
+        mints_to_resolve = []
+        for token in tokens:
+            mint = token.get("mint", "")
+            if mint and not token.get("creator"):
+                mints_to_resolve.append(mint)
+        
+        if not mints_to_resolve:
+            return {}
+        
+        logger.info(f"Resolving creators for {len(mints_to_resolve)} tokens via Helius...")
+        creators = self.helius.get_creators_batch(mints_to_resolve, delay=delay)
+        
+        # Update tokens with resolved creators
+        for token in tokens:
+            mint = token.get("mint", "")
+            if mint in creators and creators[mint]:
+                token["creator"] = creators[mint]
+        
+        return creators
+
+    def scan_all_sources(self, limit: int = 50, resolve_creators: bool = True) -> List[Dict[str, Any]]:
         """Scan all available sources (pump.fun + Birdeye) and merge results.
         
         Deduplicates by mint address, preferring richer data.
@@ -312,6 +340,11 @@ class PreLaunchScanner:
         
         # Sort by community score descending
         merged.sort(key=lambda t: t.get("community_score", 0), reverse=True)
+        
+        # Resolve creators via Helius (if enabled)
+        if resolve_creators:
+            self.resolve_creators(merged)
+        
         return merged[:limit]
 
     def get_token_social_links(self, mint: str) -> Dict[str, Any]:

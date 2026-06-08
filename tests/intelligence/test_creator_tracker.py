@@ -16,10 +16,14 @@ from src.intelligence.creator_tracker import CreatorTrackerAgent, CreatorProfile
 class TestCreatorTrackerAgent:
     def test_initialization(self):
         """Test agent initializes with empty registry."""
-        agent = CreatorTrackerAgent()
-        assert agent.agent_name == "CreatorTrackerAgent"
-        assert len(agent.creator_profiles) == 0
-        assert agent.db_path.name == "creator_registry.json"
+        import tempfile
+        from pathlib import Path
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "test_creators.json"
+            agent = CreatorTrackerAgent({"creator_db_path": str(db_path)})
+            assert agent.agent_name == "CreatorTrackerAgent"
+            assert len(agent.creator_profiles) == 0
+            assert agent.db_path == db_path
 
     def test_initialization_with_custom_path(self):
         """Test agent accepts custom DB path."""
