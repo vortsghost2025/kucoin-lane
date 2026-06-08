@@ -16,5 +16,17 @@ atomicwrites>=1.4.0
 # Notifications (optional)
 # python-telegram-bot>=20.0
 
+# Solana / DEX on-chain
+solana-py>=0.34.0
+solders>=0.21.0
+
+# Async HTTP (social providers, DexScreener, GeckoTerminal)
+httpx>=0.27.0
+aiohttp>=3.9.0
+
+# Telegram signal extraction (optional — graceful no-op if missing)
+telethon>=1.36.0
+
 # Testing
 pytest>=8.0.0
+pytest-asyncio>=0.23.0

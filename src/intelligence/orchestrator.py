@@ -39,6 +39,7 @@ from ..risk.portfolio_circuit_breaker import (
 from .regime_detector import RegimeDetector
 from .lead_lag import LeadLagMonitor
 from .whale_watch import WhaleWatch
+from .dex_alert_agent import DexAlertAgent
 from ..data.kucoin_klines_fetcher import KuCoinKlinesFetcher
 from .strategies import StrategyFactory
 
@@ -121,6 +122,7 @@ class IntelligenceOrchestrator(BaseAgent):
         enable_regime = config.get("enable_regime", True)
         enable_lead_lag = config.get("enable_lead_lag", True)
         enable_whale = config.get("enable_whale", True)
+        enable_dex = config.get("enable_dex", False)
 
         self.timeframe = config.get("timeframe") or os.getenv("CANDLE_INTERVAL", "1hour")
         if "timeframe" not in config:
@@ -129,7 +131,8 @@ class IntelligenceOrchestrator(BaseAgent):
         self.regime_detector = RegimeDetector(timeframe=self.timeframe) if enable_regime else None
         self.lead_lag = LeadLagMonitor() if enable_lead_lag else None
         self.whale_watch = WhaleWatch() if enable_whale else None
-        
+        self.dex_alert_agent = DexAlertAgent(config) if enable_dex else None
+
         # Strategy signal generator (VolBreakout, Supertrend, or legacy RSI/regime)
         strategy_name = config.get("strategy") or os.getenv("STRATEGY", "vol_breakout").lower()
         if strategy_name in ("vol_breakout", "supertrend", "rsi_regime"):
@@ -154,6 +157,7 @@ class IntelligenceOrchestrator(BaseAgent):
             "regime": enable_regime,
             "lead_lag": enable_lead_lag,
             "whale": enable_whale,
+            "dex": enable_dex,
         }
 
         self.regime_guard_mode = os.getenv("REGIME_GUARD_MODE", REGIME_GUARD_MODE)
@@ -172,6 +176,10 @@ class IntelligenceOrchestrator(BaseAgent):
         self.circuit_breaker_active = False
         self._load_cb_state()
         self.agent_registry: Dict[str, BaseAgent] = {}
+
+        # Register enabled agents in the registry (only BaseAgent subclasses)
+        if self.dex_alert_agent:
+            self.register_agent(self.dex_alert_agent)
         self.is_paper_trading = config.get("paper_trading", True)
         self._last_daily_reset: Optional[str] = None
         self._cycle_count = 0
@@ -1115,42 +1123,55 @@ class IntelligenceOrchestrator(BaseAgent):
                                 f"{whale_result.get('signal', 'NEUTRAL')} "
                                 f"(CVD: {whale_result.get('cvd_ratio', 0.5):.1%})"
                             )
-                    else:
-                        self.logger.debug(
-                            f"[INTELLIGENCE] No OHLCV data for {pair}, "
-                            f"using MarketAnalysisAgent regime only"
-                        )
+                        else:
+                            self.logger.debug(
+                                f"[INTELLIGENCE] No OHLCV data for {pair}, "
+                                f"using MarketAnalysisAgent regime only"
+                            )
                 except Exception as e:
                     self.logger.warning(f"[INTELLIGENCE] Klines analysis failed (non-fatal): {e}")
 
+            if self.enable_dex and self.dex_alert_agent:
+                try:
+                    dex_result = self.dex_alert_agent.execute({"action": "scan"})
+                    if dex_result:
+                        cycle_results["dex_alerts"] = dex_result
+                        strong = dex_result.get("strong_buy_alerts", 0)
+                        buy = dex_result.get("buy_alerts", 0)
+                        watch = dex_result.get("watch_alerts", 0)
+                        self.logger.info(
+                            f"[DEX] Alert scan complete: {strong} STRONG_BUY, {buy} BUY, {watch} WATCH"
+                        )
+                except Exception as e:
+                    self.logger.warning(f"[DEX] Alert scan failed (non-fatal): {e}")
 
             if self.trading_paused and not self.circuit_breaker_active:
                 if market_regime in ["neutral", "bullish"]:
                     if not self.resume_warning_given:
                         self.resume_warning_given = True
-                        self.logger.info(
-                            f"[INFO] SNOEPILE WARMING: Market regime is {market_regime}. "
-                            f"Will auto-resume next cycle if conditions hold."
-                        )
-                        cycle_results["final_result"] = self.create_message(
-                            action="orchestrate_workflow",
-                            success=True,
-                            data={
-                                "trading_paused": True,
-                                "resume_warning": True,
-                                "regime": market_regime,
-                            },
-                        )
-                        return cycle_results["final_result"]
-                    else:
-                        self.resume_trading(
-                            f"Auto-resume: Market regime improved to {market_regime}"
-                        )
-                        self.logger.info(
-                            f"[INFO] Auto-resumed trading - market regime: {market_regime}"
-                        )
+                    self.logger.info(
+                        f"[INFO] SNOEPILE WARMING: Market regime is {market_regime}. "
+                        f"Will auto-resume next cycle if conditions hold."
+                    )
+                    cycle_results["final_result"] = self.create_message(
+                        action="orchestrate_workflow",
+                        success=True,
+                        data={
+                            "trading_paused": True,
+                            "resume_warning": True,
+                            "regime": market_regime,
+                        },
+                    )
+                    return cycle_results["final_result"]
                 else:
-                    self.resume_warning_given = False
+                    self.resume_trading(
+                        f"Auto-resume: Market regime improved to {market_regime}"
+                    )
+                    self.logger.info(
+                        f"[INFO] Auto-resumed trading - market regime: {market_regime}"
+                    )
+            else:
+                self.resume_warning_given = False
 
             skip_execution = False
             if market_regime == "bearish" and not self.trading_paused:

@@ -1,0 +1,230 @@
+Looking at your repo and the current status, let me give you a clear picture and concrete next steps.
+
+## Current Pipeline Status
+
+```
+DexScreener → ✅ Tokens with socials
+Birdeye     → ✅ Token data, ❌ No creator (free tier limitation)  
+Pump.fun    → ❌ Blocked (HTTP 530)
+Creator     → ❌ "unknown" for all tokens
+```
+
+## The Creator Problem - Root Cause
+
+```python
+# What we have:
+token = {
+    "mint": "ABC123...",
+    "name": "DOGE2",
+    "twitter": "@doge2",
+    # creator: MISSING - none of our sources provide this
+}
+
+# What we NEED for reputation scoring:
+token = {
+    "mint": "ABC123...",
+    "creator": "WalletXYZ...",  # ← This links tokens to their maker
+    "name": "DOGE2",
+}
+```
+
+---
+
+## Option 1: Helius RPC (Best Solution - Free Tier Available)
+
+```python
+# helius_creator.py
+import httpx
+
+HELIUS_API_KEY = "your-key-here"  # free at helius.dev - no credit card
+
+async def get_token_creator(mint_address: str) -> str | None:
+    """
+    Get creator wallet by fetching the mint account's first transaction
+    This is the actual token deployer wallet
+    """
+    url = f"https://mainnet.helius-rpc.com/?api-key={HELIUS_API_KEY}"
+    
+    # Step 1: Get signatures for the mint address
+    payload = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "getSignaturesForAddress",
+        "params": [
+            mint_address,
+            {"limit": 1, "before": None}  # Get OLDEST transaction
+        ]
+    }
+    
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(url, json=payload)
+        data = resp.json()
+        
+    signatures = data.get("result", [])
+    if not signatures:
+        return None
+        
+    # The last signature = creation transaction
+    # We need to go further back - get the last page
+    oldest_sig = signatures[-1]["signature"]
+    
+    # Step 2: Parse that transaction to find fee payer (= creator)
+    tx_payload = {
+        "jsonrpc": "2.0", 
+        "id": 2,
+        "method": "getTransaction",
+        "params": [
+            oldest_sig,
+            {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
+        ]
+    }
+    
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(url, json=tx_payload)
+        tx_data = resp.json()
+    
+    result = tx_data.get("result")
+    if not result:
+        return None
+        
+    # Fee payer of mint creation tx = token creator
+    account_keys = result["transaction"]["message"]["accountKeys"]
+    creator = account_keys[0]["pubkey"]  # Index 0 = fee payer = creator
+    
+    return creator
+
+
+# Test it:
+# asyncio.run(get_token_creator("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"))
+```
+
+---
+
+## Option 2: Wire Up Continuous Pipeline Now (With Unknown Creators)
+
+Even without creator data, we can start building the database and add creator lookup later:
+
+```python
+# orchestrator_patch.py - Add to your existing orchestrator
+
+import json
+import asyncio
+from datetime import datetime
+from pathlib import Path
+
+REGISTRY_FILE = "creator_registry.json"
+SIGNALS_FILE = "signal_log.json"
+
+def load_registry() -> dict:
+    if Path(REGISTRY_FILE).exists():
+        return json.load(open(REGISTRY_FILE))
+    return {}
+
+def save_registry(registry: dict):
+    json.dump(registry, open(REGISTRY_FILE, "w"), indent=2)
+
+def load_signals() -> list:
+    if Path(SIGNALS_FILE).exists():
+        return json.load(open(SIGNALS_FILE))
+    return []
+
+def save_signals(signals: list):
+    json.dump(signals, open(SIGNALS_FILE, "w"), indent=2)
+
+
+async def process_token_batch(tokens: list, creator_lookup_fn=None):
+    """
+    Process tokens from DexScreener
+    creator_lookup_fn: optional async fn(mint) -> wallet_address
+    """
+    registry = load_registry()
+    signals = load_signals()
+    
+    for token in tokens:
+        mint = token.get("mint") or token.get("baseToken", {}).get("address")
+        if not mint:
+            continue
+            
+        # Try to get creator
+        creator = "unknown"
+        if creator_lookup_fn:
+            try:
+                creator = await creator_lookup_fn(mint) or "unknown"
+                await asyncio.sleep(0.1)  # Rate limit
+            except Exception as e:
+                print(f"Creator lookup failed for {mint}: {e}")
+        
+        # Build token record
+        token_record = {
+            "mint": mint,
+            "name": token.get("name") or token.get("baseToken", {}).get("name", ""),
+            "symbol": token.get("symbol") or token.get("baseToken", {}).get("symbol", ""),
+            "creator": creator,
+            "twitter": token.get("twitter", ""),
+            "telegram": token.get("telegram", ""),
+            "website": token.get("website", ""),
+            "first_seen": datetime.utcnow().isoformat(),
+            "source": token.get("_source", "dexscreener"),
+        }
+        
+        # Update creator registry
+        if creator != "unknown":
+            if creator not in registry:
+                registry[creator] = {
+                    "wallet": creator,
+                    "tokens": [],
+                    "total_launched": 0,
+                    "score": 50,  # Neutral starting score
+                    "flags": []
+                }
+            
+            # Add token if not already tracked
+            known_mints = [t["mint"] for t in registry[creator]["tokens"]]
+            if mint not in known_mints:
+                registry[creator]["tokens"].append(token_record)
+                registry[creator]["total_launched"] += 1
+                print(f"✅ Creator {creator[:8]}... launched token #{registry[creator]['total_launched']}: {token_record['name']}")
+        
+        # Log signal regardless
+        signal = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "mint": mint,
+            "creator": creator,
+            "name": token_record["name"],
+            "has_twitter": bool(token_record["twitter"]),
+            "has_telegram": bool(token_record["telegram"]),
+        }
+        signals.append(signal)
+    
+    save_registry(registry)
+    save_signals(signals[-1000:])  # Keep last 1000 signals
+    
+    print(f"📊 Registry: {len(registry)} creators | Signals: {len(signals)} tokens")
+    return registry
+```
+
+---
+
+## Recommended: Do Both
+
+```
+Step 1: Sign up at helius.dev (free, takes 2 min)
+         → Get API key → plug into helius_creator.py
+         
+Step 2: Wire continuous pipeline with creator lookup enabled
+         → Every token from DexScreener gets creator resolved
+         
+Step 3: creator_registry.json starts filling with REAL data
+```
+
+**To confirm your Birdeye tier** - check the response headers when you hit `/defi/token_creation_info`:
+```
+X-RateLimit-Limit: 60    ← free tier
+X-RateLimit-Limit: 600   ← paid tier
+```
+Free tier typically excludes `creator` field - that's almost certainly your issue.
+
+**Do you want me to:**
+1. Write the full Helius integration + wire it into the orchestrator?
+2. Start the continuous loop with DexScreener only (unknown creators for now)?
+3. Both - run pipeline now, add Helius creator lookup once you have the key?

@@ -82,3 +82,7 @@ docs/research/mega_sweep_4h_maker.json
 docs/research/mega_sweep_4h_taker.json
 docs/research/mega_sweep_results.json
 docs/research/btc_compounding_sweep_results.json
+
+# Development test files (not for commit)
+test_*.py
+analyze_data.py

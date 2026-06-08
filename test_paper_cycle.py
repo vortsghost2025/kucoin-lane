@@ -12,7 +12,7 @@ load_dotenv(Path(__file__).parent / 'config' / '.env')
 
 print("=== LOCAL PAPER CYCLE TEST ===")
 print(f"PAPER_TRADING: {os.getenv('PAPER_TRADING')}")
-print(f"SOLANA_RPC_URL: {os.getenv('SOLANA_RPC_URL')[:40]}...")
+print(f"SOLANA_RPC_URL: {(os.getenv('SOLANA_RPC_URL') or '')[:40]}...")
 print()
 
 # DEX Intelligence

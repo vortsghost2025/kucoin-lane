@@ -46,6 +46,7 @@ class TestIntelligenceOrchestrator:
             "regime": False,
             "lead_lag": False,
             "whale": False,
+            "dex": False,
         }
         assert orchestrator.current_stage == WorkflowStage.IDLE
         assert orchestrator.trading_paused is False

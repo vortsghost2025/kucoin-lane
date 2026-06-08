@@ -36,7 +36,9 @@ print(f"   {len(new_creators)} new creators detected, {creator_result.get('data'
 print("\n[3] DEX→CEX LAG DETECTION")
 from src.intelligence.lead_lag import DexToCexLagDetector
 lag_detector = DexToCexLagDetector(lag_window_days=30, min_composite_score=0.4)
-lag_signals = lag_detector.run(dex_signals=dex_signals)
+lag_detector.load_kucoin_listings()
+lag_detector.dex_signals = dex_signals
+lag_signals = lag_detector.detect()
 opps = [s for s in lag_signals if s.get("lead_lag_signal") == "OPPORTUNITY"]
 watches = [s for s in lag_signals if s.get("lead_lag_signal") == "WATCH"]
 stales = [s for s in lag_signals if s.get("lead_lag_signal") == "STALE"]
