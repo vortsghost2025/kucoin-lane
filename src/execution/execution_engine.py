@@ -607,11 +607,13 @@ class DryRunExecutor(ExecutionEngine):
                 # Wire exchange adapter for klines/OHLCV fetching (enables RegimeDetector + WhaleWatch)
                 try:
                     from ..execution.exchange_adapter import KuCoinAdapter
-                    # Adapter init now non-fatal on auth failure — klines are public
+                    # Adapter requires real API keys - klines are public but auth needed for other endpoints
+                    if not KUCOIN_API_KEY or not KUCOIN_API_SECRET or not KUCOIN_API_PASSPHRASE:
+                        raise ValueError("KuCoin API credentials not configured - set KUCOIN_API_KEY, KUCOIN_API_SECRET, KUCOIN_API_PASSPHRASE in environment")
                     klines_adapter = KuCoinAdapter(
-                        api_key=KUCOIN_API_KEY or "dummy",
-                        api_secret=KUCOIN_API_SECRET or "dummy",
-                        passphrase=KUCOIN_API_PASSPHRASE or "dummy",
+                        api_key=KUCOIN_API_KEY,
+                        api_secret=KUCOIN_API_SECRET,
+                        passphrase=KUCOIN_API_PASSPHRASE,
                     )
                     self.orchestrator.set_exchange_adapter(klines_adapter)
                     self.log("info", "Klines adapter wired — ADX/ATR regime detection active")

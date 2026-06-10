@@ -130,9 +130,13 @@ def create_exchange_adapter():
     try:
         from src.execution.exchange_adapter import KuCoinAdapter
 
-        api_key = os.getenv("KUCOIN_API_KEY", "dummy")
-        api_secret = os.getenv("KUCOIN_API_SECRET", "dummy")
-        passphrase = os.getenv("KUCOIN_API_PASSPHRASE", "dummy")
+        api_key = os.getenv("KUCOIN_API_KEY")
+        api_secret = os.getenv("KUCOIN_API_SECRET")
+        passphrase = os.getenv("KUCOIN_API_PASSPHRASE")
+        
+        if not api_key or not api_secret or not passphrase:
+            raise ValueError("KuCoin API credentials not configured - set KUCOIN_API_KEY, KUCOIN_API_SECRET, KUCOIN_API_PASSPHRASE in environment")
+        
         adapter = KuCoinAdapter(
             api_key=api_key,
             api_secret=api_secret,
