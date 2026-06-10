@@ -288,6 +288,12 @@ class DexToCexLagDetector:
             self.dex_signals = []
             return []
 
+        # Defensive: ensure data is a dict
+        if not isinstance(data, dict):
+            logger.warning("DEX backtest data is not a dict (type: %s), skipping", type(data).__name__)
+            self.dex_signals = []
+            return []
+
         per_signal = data.get("signals_with_performance", []) or []
         filtered = [
             s for s in per_signal

@@ -108,7 +108,7 @@ class DexSignalScorer:
         else:
             buy_ratio_1h = 0.5
 
-        return {
+        scored = {
             "pair": f"{pair.get('base_token', {}).get('symbol', '?')}/{pair.get('quote_token', {}).get('symbol', '?')}",
             "chain": chain,
             "composite_score": round(composite, 3),
@@ -123,6 +123,11 @@ class DexSignalScorer:
             "signal": "STRONG_BUY" if composite >= 0.6 else "BUY" if composite >= 0.4 else "NEUTRAL" if composite >= 0.2 else "AVOID",
             "cex_listing_likelihood": "HIGH" if composite >= 0.6 else "MEDIUM" if composite >= 0.4 else "LOW",
         }
+        # Preserve all original fields from the input pair (including base_token, mint, etc.)
+        for k, v in pair.items():
+            if k not in scored:
+                scored[k] = v
+        return scored
 
     def rank_pairs(self, pairs: List[Dict[str, Any]], top_n: int = 20) -> List[Dict[str, Any]]:
         scored = [self.score_pair(p) for p in pairs]

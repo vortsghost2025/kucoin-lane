@@ -277,6 +277,9 @@ MONITOR_CONFIG = {
 
 REGIME_GUARD_MODE = os.getenv("REGIME_GUARD_MODE", "v1_soft_halt")
 
+# Creator boost threshold (default 0.8, can be overridden via env)
+CREATOR_BOOST_THRESHOLD = float(os.getenv("CREATOR_BOOST_THRESHOLD", "1.0"))
+
 
 TELEGRAM_CONFIG = {
     "bot_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),

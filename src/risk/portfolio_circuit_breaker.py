@@ -53,6 +53,13 @@ class PortfolioCircuitBreaker:
             logger.warning("Failed to load state from %s", self.state_path)
             self._persist(today)
             return
+        
+        # Defensive: ensure state is a dict
+        if not isinstance(state, dict):
+            logger.warning("Circuit breaker state is not a dict (type: %s), resetting", type(state).__name__)
+            self._persist(today)
+            return
+        
         if state.get("date") != today:
             self._persist(today)
             return

@@ -51,6 +51,14 @@ class PaperTradeLedger:
             try:
                 with open(self.filepath, "r") as f:
                     data = json.load(f)
+                
+                # Defensive: ensure data is a dict
+                if not isinstance(data, dict):
+                    logger.warning(f"[LEDGER] Data is not a dict (type: {type(data).__name__}), starting fresh")
+                    self.trades = []
+                    self._next_id = 1
+                    return
+                
                 self.trades = data.get("trades", [])
                 self._next_id = data.get("next_id", len(self.trades) + 1)
                 logger.info(

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from .dexscreener import DexScreenerProvider
 from .geckoterminal import GeckoTerminalProvider
 from .pumpfun import PumpFunTracker
+from .phantom import PhantomLauncherScanner
 from .signals import DexSignalScorer
 
 logger = logging.getLogger(__name__)
@@ -21,6 +22,7 @@ class DexScanner:
         self.ds = DexScreenerProvider()
         self.gt = GeckoTerminalProvider()
         self.pf = PumpFunTracker(rpc_url=rpc_url) if rpc_url else None
+        self.phantom = PhantomLauncherScanner()
         self.scorer = DexSignalScorer()
 
     def scan_trending(self, chain: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -70,6 +72,14 @@ class DexScanner:
             logger.warning("PumpFun scan failed: %s", e)
             return []
 
+    def scan_phantom(self) -> List[Dict[str, Any]]:
+        """Scan for new token launches on Phantom.com."""
+        try:
+            return self.phantom.scan_new_launches()
+        except Exception as e:
+            logger.warning("Phantom scan failed: %s", e)
+            return []
+
     def full_scan(self, chain: Optional[str] = None) -> Dict[str, Any]:
         chain = chain or self.chains[0]
         start = time.time()
@@ -105,6 +115,7 @@ class DexScanner:
                 pool_scored["signal"] = "NEUTRAL"
             scored_new.append(pool_scored)
         pumpfun = self.scan_pumpfun(limit=10) if self.pf else []
+        phantom = self.scan_phantom()
         elapsed = round(time.time() - start, 2)
         return {
             "scan_time": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -113,10 +124,12 @@ class DexScanner:
             "trending_count": len(trending),
             "new_pools_count": len(new_pools),
             "pumpfun_count": len(pumpfun),
+            "phantom_count": len(phantom),
             "top_trending": scored_trending[:5],
             "top_new_pools": scored_new[:5],
             "pumpfun_graduation_candidates": [t for t in pumpfun if t.get("bonding_progress_pct", 0) >= 80],
-            "summary": self._build_summary(scored_trending, scored_new, pumpfun),
+            "phantom_recent_launches": phantom[:10],  # Include recent Phantom launches
+            "summary": self._build_summary(scored_trending, scored_new, pumpfun, phantom),
         }
 
     @staticmethod
@@ -124,11 +137,15 @@ class DexScanner:
         trending: List[Dict[str, Any]],
         new_pools: List[Dict[str, Any]],
         pumpfun: List[Dict[str, Any]],
+        phantom: List[Dict[str, Any]] = None,
     ) -> str:
+        if phantom is None:
+            phantom = []
         strong_buys = [t for t in trending if t.get("signal") == "STRONG_BUY"]
         buys = [t for t in trending if t.get("signal") == "BUY"]
         graduated = [t for t in pumpfun if t.get("graduated")]
         near_grad = [t for t in pumpfun if t.get("bonding_progress_pct", 0) >= 80 and not t.get("graduated")]
+        recent_launches = len(phantom)
         parts = []
         if strong_buys:
             parts.append(f"{len(strong_buys)} STRONG_BUY signals")
@@ -138,6 +155,8 @@ class DexScanner:
             parts.append(f"{len(graduated)} PumpFun graduations")
         if near_grad:
             parts.append(f"{len(near_grad)} near-graduation")
+        if recent_launches:
+            parts.append(f"{recent_launches} Phantom launches")
         if not parts:
             return "No actionable signals detected"
         return "; ".join(parts)

@@ -72,7 +72,8 @@ bot_heartbeat_dry_run.json
 external/
 
 # Market data files
-data/
+/data/
+!src/data/
 sweep_output.txt
 docs/research/short_leverage_sweep_1d.json
 # Large sweep result JSONs (>100MB, use .gz or LFS)

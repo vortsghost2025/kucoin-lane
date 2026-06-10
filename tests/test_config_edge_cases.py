@@ -78,8 +78,13 @@ class TestConfigBoundaryValues:
 
 class TestConfigMissingVars:
     def test_api_config_defaults_when_unset(self, monkeypatch):
-        for var in ["KUCOIN_API_KEY", "KUCOIN_API_SECRET", "KUCOIN_API_PASSPHRASE"]:
-            monkeypatch.delenv(var, raising=False)
+        import src.config as local_cfg
+        if local_cfg.KUCOIN_API_KEY:
+            pytest.skip("KuCoin keys present in .env - test requires empty env")
+        monkeypatch.delenv("KUCOIN_API_KEY", raising=False)
+        monkeypatch.delenv("KUCOIN_API_SECRET", raising=False)
+        monkeypatch.delenv("KUCOIN_API_PASSPHRASE", raising=False)
+        monkeypatch.setattr("src.config.load_dotenv", lambda x: None)
         importlib.reload(cfg)
         assert cfg.API_CONFIG["api_key"] == ""
         assert cfg.API_CONFIG["api_secret"] == ""
