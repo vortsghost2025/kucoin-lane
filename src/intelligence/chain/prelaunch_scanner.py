@@ -30,6 +30,10 @@ from src.data.dex_intelligence.birdeye import BirdeyeProvider
 from src.data.dex_intelligence.dexscreener import DexScreenerProvider
 from src.intelligence.chain.helius_provider import HeliusProvider
 
+# Load .env for API keys
+from dotenv import load_dotenv
+load_dotenv('S:/kucoin-lane/.env')
+
 logger = logging.getLogger(__name__)
 
 PUMPFUN_BASE = "https://pump.fun"
