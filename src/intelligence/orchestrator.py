@@ -28,9 +28,11 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-
 from ..base_agent import BaseAgent, AgentStatus
-from ..config import REGIME_GUARD_MODE, SPOT_LONG_ONLY
+
+from .creator_intel import get_creator_boost
+from ..config import REGIME_GUARD_MODE, SPOT_LONG_ONLY, CREATOR_BOOST_THRESHOLD
+from ..monitoring.metrics import set_creator_boosts
 from ..risk.circuit_breaker import CircuitBreaker
 from ..risk.portfolio_circuit_breaker import (
     PortfolioCircuitBreaker,
@@ -51,6 +53,7 @@ DEFAULT_NOTIONAL_PAUSE_DURATION_HOURS = 0.25
 COOLDOWN_HOURS = 4
 COOLDOWN_SECONDS = COOLDOWN_HOURS * 3600
 V4_ADX_THRESHOLD = 50
+
 V2_CONSECUTIVE_DOWNTREND_LIMIT = 2
 MIN_ACCOUNT_BALANCE_RECOMMENDATION = 50
 LEAD_LAG_DANGER_CONFIDENCE = 1.0
@@ -118,6 +121,15 @@ class IntelligenceOrchestrator(BaseAgent):
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         super().__init__("IntelligenceOrchestrator", config)
         config = config or {}
+        # Initialize creator boost threshold (configurable via env or config)
+        self.creator_boost_threshold = float(
+            config.get(
+                "creator_boost_threshold",
+                os.getenv("CREATOR_BOOST_THRESHOLD", str(CREATOR_BOOST_THRESHOLD)),
+            )
+        )
+        self.logger.info(f"[INIT] Creator boost threshold set to {self.creator_boost_threshold}")
+        self._creator_boosts_this_cycle = 0
 
         enable_regime = config.get("enable_regime", True)
         enable_lead_lag = config.get("enable_lead_lag", True)
@@ -292,6 +304,12 @@ class IntelligenceOrchestrator(BaseAgent):
             if os.path.exists(self._cb_state_path):
                 with open(self._cb_state_path, "r") as f:
                     state = json.load(f)
+                
+                # Defensive: ensure state is a dict
+                if not isinstance(state, dict):
+                    logger.warning("CB state is not a dict (type: %s), ignoring", type(state).__name__)
+                    return
+                
                 if state.get("active"):
                     self.circuit_breaker_active = True
                     self.trading_paused = True
@@ -490,40 +508,37 @@ class IntelligenceOrchestrator(BaseAgent):
 
         try:
             for symbol in symbols:
-                try:
-                    ticker = self._exchange_adapter.get_ticker(symbol)
-                    bid = ticker.get("bid", 0.0)
-                    ask = ticker.get("ask", 0.0)
-                    last = ticker.get("last", 0.0)
+                ticker = self._exchange_adapter.get_ticker(symbol)
+                bid = ticker.get("bid", 0.0)
+                ask = ticker.get("ask", 0.0)
+                last = ticker.get("last", 0.0)
 
-                    if bid > 0 and ask > 0:
-                        spread = ask - bid
-                        spread_pct = spread / ((ask + bid) / 2) if (ask + bid) > 0 else 0
-                        mid_price = (ask + bid) / 2
+                if bid > 0 and ask > 0:
+                    spread = ask - bid
+                    spread_pct = spread / ((ask + bid) / 2) if (ask + bid) > 0 else 0
+                    mid_price = (ask + bid) / 2
 
-                        spread_data[symbol] = {
-                            "bid": bid,
-                            "ask": ask,
-                            "last": last,
-                            "spread": spread,
-                            "spread_pct": spread_pct,
-                            "mid_price": mid_price,
-                            "timestamp": time.time()
-                        }
-
-                        self.logger.debug(f"Ticker {symbol}: Bid={bid:.6f}, Ask={ask:.6f}, Spread={spread:.6f} ({spread_pct:.2%})")
-                    else:
-                        self.logger.warning(f"Invalid ticker data for {symbol}: bid={bid}, ask={ask}")
-                        spread_data[symbol] = {
-                            "error": "Invalid ticker data",
-                            "timestamp": time.time()
-                        }
-                except Exception as e:
-                    self.logger.warning(f"Failed to fetch ticker for {symbol}: {e}")
                     spread_data[symbol] = {
-                        "error": str(e),
+                        "bid": bid,
+                        "ask": ask,
+                        "last": last,
+                        "spread": spread,
+                        "spread_pct": spread_pct,
+                        "mid_price": mid_price,
                         "timestamp": time.time()
                     }
+
+                    self.logger.debug(f"Ticker {symbol}: Bid={bid:.6f}, Ask={ask:.6f}, Spread={spread:.6f} ({spread_pct:.2%})")
+                else:
+                    self.logger.warning(f"Invalid ticker data for {symbol}: bid={bid}, ask={ask}")
+
+
+
+
+
+
+
+
         except Exception as e:
             self.logger.error(f"Error fetching ticker data: {e}")
 
@@ -1084,7 +1099,46 @@ class IntelligenceOrchestrator(BaseAgent):
                         }
                         cycle_results["intelligence_result"] = intel
 
-                        # ADX-based regime can override the simplistic MarketAnalysisAgent regime
+                        # Creator intelligence boost
+                        # Prefer actual creator wallet (from DEX signals / market_data) over symbol.
+                        # Registry keys are creator wallet addresses (or "unknown").
+                        token = pair.split("/")[0] if "/" in pair else pair
+                        creator = None
+                        if isinstance(pair_analysis_from_market, dict):
+                            creator = (
+                                pair_analysis_from_market.get("creator")
+                                or pair_analysis_from_market.get("deployer")
+                                or pair_analysis_from_market.get("creator_wallet")
+                            )
+                        if not creator:
+                            # Fallback to market_data if the DataFetchingAgent attached creator info
+                            market_pair_data = market_data.get(pair, {}) if isinstance(market_data, dict) else {}
+                            creator = (
+                                market_pair_data.get("creator")
+                                or market_pair_data.get("deployer")
+                            )
+                        if not creator:
+                            creator = token  # fallback (will usually give boost=1.0)
+
+                        try:
+                            creator_boost = get_creator_boost(creator)
+                            if creator_boost > self.creator_boost_threshold and isinstance(pair_analysis_from_market, dict):
+                                current_strength = pair_analysis_from_market.get("signal_strength", 0.0)
+                                if current_strength > 0:
+                                    boosted = min(1.0, current_strength * creator_boost)
+                                    pair_analysis_from_market["signal_strength"] = boosted
+                                    pair_analysis_from_market["creator_boost"] = creator_boost
+                                    pair_analysis_from_market["creator_id_used"] = creator
+                            self.logger.info(
+                                f"[CREATOR] {pair} signal_strength boosted by creator intel: "
+                                f"{current_strength:.3f} → {boosted:.3f} "
+                                f"(boost={creator_boost:.2f}, creator={str(creator)[:12]}…)"
+                            )
+                            self._creator_boosts_this_cycle += 1
+                        except Exception as e:
+                            self.logger.debug(f"[CREATOR] boost failed for {pair}: {e}")
+
+
                         if regime_result and regime_result.get("regime") != "UNKNOWN":
                             adx_regime = regime_result["regime"]
                             adx_rec = regime_result.get("recommendation", "")
@@ -1129,21 +1183,21 @@ class IntelligenceOrchestrator(BaseAgent):
                                 f"using MarketAnalysisAgent regime only"
                             )
                 except Exception as e:
-                    self.logger.warning(f"[INTELLIGENCE] Klines analysis failed (non-fatal): {e}")
+                    self.logger.error(f"[INTELLIGENCE] Kline/whale processing failed: {e}")
 
-            if self.enable_dex and self.dex_alert_agent:
-                try:
-                    dex_result = self.dex_alert_agent.execute({"action": "scan"})
-                    if dex_result:
-                        cycle_results["dex_alerts"] = dex_result
-                        strong = dex_result.get("strong_buy_alerts", 0)
-                        buy = dex_result.get("buy_alerts", 0)
-                        watch = dex_result.get("watch_alerts", 0)
-                        self.logger.info(
-                            f"[DEX] Alert scan complete: {strong} STRONG_BUY, {buy} BUY, {watch} WATCH"
-                        )
-                except Exception as e:
-                    self.logger.warning(f"[DEX] Alert scan failed (non-fatal): {e}")
+                if self.enable_dex and self.dex_alert_agent:
+                    try:
+                        dex_result = self.dex_alert_agent.execute({"action": "scan"})
+                        if dex_result:
+                            cycle_results["dex_alerts"] = dex_result
+                            strong = dex_result.get("strong_buy_alerts", 0)
+                            buy = dex_result.get("buy_alerts", 0)
+                            watch = dex_result.get("watch_alerts", 0)
+                            self.logger.info(
+                                f"[DEX] Alert scan complete: {strong} STRONG_BUY, {buy} BUY, {watch} WATCH"
+                            )
+                    except Exception as e:
+                        self.logger.warning(f"[DEX] Alert scan failed (non-fatal): {e}")
 
             if self.trading_paused and not self.circuit_breaker_active:
                 if market_regime in ["neutral", "bullish"]:

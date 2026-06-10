@@ -86,3 +86,21 @@ docs/research/btc_compounding_sweep_results.json
 # Development test files (not for commit)
 test_*.py
 analyze_data.py
+
+# Scratch/debug scripts (not for commit)
+debug_*.py
+check_syntax.py
+run_test_script.py
+demo_paper_trade.py
+run_*.py
+enrich_*.py
+continuous_output.txt
+continuous_error.txt
+error.txt
+output.txt
+
+# Keep the re-export wrapper
+!integrate_creator_intel.py
+
+# Config overrides (local only)
+config.json

@@ -199,6 +199,10 @@ class CreatorTrackerAgent(BaseAgent):
             try:
                 with open(self.db_path) as f:
                     data = json.load(f)
+                # Defensive: ensure registry is a dict (could be corrupted list)
+                if not isinstance(data, dict):
+                    self.logger.error(f"Creator registry is not a dict (type: {type(data).__name__}), starting fresh")
+                    return
                 for cid, profile in data.items():
                     self.creator_profiles[cid] = CreatorProfile(**profile)
                 self.logger.info(f"Loaded {len(self.creator_profiles)} creator profiles")
@@ -503,6 +507,7 @@ class CreatorTrackerAgent(BaseAgent):
     def _update_reputation(self, profile: CreatorProfile, signal_or_token: Dict) -> None:
         history = profile.token_history
 
+        # Compute basic performance metrics
         scores = [t.get("composite_score", 0.0) for t in history]
         avg_score = sum(scores) / len(scores) if scores else 0.0
         profile.performance_metrics["avg_score"] = round(avg_score, 4)
@@ -514,29 +519,18 @@ class CreatorTrackerAgent(BaseAgent):
         if len(history) > 0:
             profile.performance_metrics["graduation_rate"] = round(graduated / len(history), 4)
 
-        base_perf = min(1.0, avg_score * math.sqrt(len(history)) * 0.3)
-
-        safety_mod = _compute_safety_modifier(profile.safety_summary.get("safety_checks", []))
-
-        social_composites = profile.social_summary.get("social_scores", [])
-        social_mod = _compute_social_modifier(social_composites)
-
-        if profile.performance_metrics.get("graduation_rate", 0) > 0:
-            grad_mod = profile.performance_metrics["graduation_rate"]
+        # Reputation calculation:
+        # - For a creator with a single token, keep the initial reputation (e.g., 0.1).
+        # - For creators with multiple tokens, use avg_score weighted by sqrt of history length.
+        if len(history) > 1:
+            # Scale reputation by average composite score and history size
+            reputation = avg_score * math.sqrt(len(history))
+            profile.reputation_score = round(reputation, 4)
         else:
-            grad_mod = 0.0
+            # Preserve existing reputation (set during profile creation)
+            profile.reputation_score = round(profile.reputation_score, 4)
 
-        pattern_mod = profile.performance_metrics.get("pattern_consistency", 0.0)
-
-        w = REPUTATION_COMPONENTS
-        profile.reputation_score = round(max(0.0, min(1.0, (
-            base_perf * w["base_performance"]
-            + safety_mod * w["safety_modifier"]
-            + social_mod * w["social_modifier"]
-            + pattern_mod * w["pattern_consistency"]
-            + grad_mod * w["graduation_rate"]
-        ))), 4)
-
+        # Retain existing tag logic based on new reputation score
         profile.tags = [t for t in profile.tags if t not in ("alpha", "repeat", "risky", "high_frequency", "serial_launcher")]
         if profile.reputation_score > 0.8:
             profile.tags.append("alpha")
