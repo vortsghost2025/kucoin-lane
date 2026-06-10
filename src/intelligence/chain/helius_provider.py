@@ -70,6 +70,30 @@ class HeliusProvider:
         url_preview = (self.rpc_url or "no-rpc-configured")[:50]
         logger.info(f"HeliusProvider initialized: {url_preview}...")
 
+    def get_transaction(self, signature: str) -> Optional[Dict[str, Any]]:
+        """Fetch a parsed transaction by signature."""
+        if not self.rpc_url or not signature:
+            return None
+
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTransaction",
+            "params": [
+                signature,
+                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0},
+            ],
+        }
+        raw = _safe_post(self.rpc_url, payload)
+        if not raw:
+            return None
+
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        return data.get("result")
+
     def get_mint_creator(self, mint: str) -> Optional[str]:
         """
         Get the creator wallet of a token by finding the mint creation transaction.
@@ -130,26 +154,7 @@ class HeliusProvider:
         oldest_sig = all_signatures[-1]["signature"]
         
         # Step 2: Fetch the creation transaction
-        tx_payload = {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "getTransaction",
-            "params": [
-                oldest_sig,
-                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
-            ]
-        }
-        
-        raw = _safe_post(self.rpc_url, tx_payload)
-        if not raw:
-            return None
-        
-        try:
-            data = json.loads(raw)
-        except (json.JSONDecodeError, TypeError):
-            return None
-        
-        result = data.get("result")
+        result = self.get_transaction(oldest_sig)
         if not result:
             return None
         

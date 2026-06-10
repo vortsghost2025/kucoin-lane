@@ -29,13 +29,54 @@ class TradeDecision:
     suggested_size_pct: float = 0.01  # 1% of capital for first penny
 
 
+def _symbol_from_token(token: Dict[str, Any]) -> str:
+    """Return a stable display symbol for dict-based token inputs."""
+    ticker = token.get("ticker")
+    if ticker:
+        return str(ticker).upper()
+    symbol = token.get("symbol")
+    if symbol:
+        return str(symbol).upper()
+    mint = token.get("mint", "")
+    if mint:
+        return str(mint)[:6].upper()
+    return "UNKNOWN"
+
+
+def _make_dict_decisions(tokens: List[Dict[str, Any]], threshold: float) -> List[Dict[str, Any]]:
+    decisions: List[Dict[str, Any]] = []
+    for token in tokens:
+        if not isinstance(token, dict):
+            continue
+        mint = token.get("mint")
+        if not mint or "community_score" not in token:
+            continue
+        try:
+            score = float(token.get("community_score"))
+        except (TypeError, ValueError):
+            continue
+        if score < threshold:
+            continue
+        decisions.append({
+            "mint": mint,
+            "symbol": _symbol_from_token(token),
+            "score": score,
+            "action": "buy",
+            "priority": token.get("pre_launch_tier") == "HIGH_CONFIDENCE",
+        })
+
+    decisions.sort(key=lambda d: d["score"], reverse=True)
+    return decisions
+
+
 def make_trade_decisions(
-    tokens: List[TokenInfo],
+    tokens: List[Any],
+    threshold: Optional[float] = None,
     min_community_score: float = 0.3,
     min_boost: float = 1.0,
     max_positions: int = 3,
     current_positions: int = 0,
-) -> List[TradeDecision]:
+) -> List[Any]:
     """
     Core function: turn a list of fresh pre-launch / new tokens into trade decisions.
 
@@ -45,9 +86,23 @@ def make_trade_decisions(
     - Simple position limit.
     - Returns prioritized list of BUY/WATCH/SKIP decisions.
     """
+    dict_threshold = 0.5 if threshold is None else threshold
+    if threshold is not None:
+        min_community_score = threshold
+
+    if not tokens:
+        return []
+
+    has_dict_inputs = any(isinstance(token, dict) for token in tokens)
+    has_tokeninfo_inputs = any(isinstance(token, TokenInfo) for token in tokens)
+    if has_dict_inputs and not has_tokeninfo_inputs:
+        return _make_dict_decisions(tokens, dict_threshold)
+
     decisions: List[TradeDecision] = []
 
     for token in tokens:
+        if not isinstance(token, TokenInfo):
+            continue
         creator = token.creator or "unknown"
         boost = get_creator_boost(creator)
 

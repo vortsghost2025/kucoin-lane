@@ -18,6 +18,7 @@ ALL DATA IS REAL. PAPER MODE = PAPER MONEY ONLY. ZERO DIFFERENCE TO LIVE.
 """
 
 import argparse
+import asyncio
 import json
 import logging
 import os
@@ -349,6 +350,37 @@ def run_continuous_pipeline(
     print(ledger.generate_report())
 
 
+def start_metrics_server(port: int) -> None:
+    """Start the Prometheus metrics endpoint for live stream telemetry."""
+    if port <= 0:
+        return
+    try:
+        from prometheus_client import start_http_server
+
+        start_http_server(port)
+        print(f"[METRICS] Prometheus HTTP server listening on :{port}")
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Could not start Prometheus metrics server: %s", exc)
+
+
+async def run_streaming_prelaunch_pipeline(
+    output_dir: Path = Path("data"),
+    max_events: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Consume live Pump.fun creation events instead of waiting for polling cycles."""
+    from src.intelligence.live_prelaunch_stream import (
+        HeliusPumpFunWebSocketSource,
+        LivePreLaunchEventProcessor,
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    source = HeliusPumpFunWebSocketSource()
+    processor = LivePreLaunchEventProcessor(output_dir=output_dir)
+
+    print("[STREAM] Listening for live Pump.fun token creation events")
+    return await processor.run(source.events(), max_events=max_events)
+
+
 def main():
     parser = argparse.ArgumentParser(description="First-penny trading pipeline - REAL DATA, PAPER MONEY")
     parser.add_argument("--mode", choices=["paper", "live"], default="paper")
@@ -360,9 +392,24 @@ def main():
     parser.add_argument("--min-boost", type=float, default=1.0, help="Minimum creator boost for BUY")
     parser.add_argument("--min-community-score", type=float, default=0.25, help="Minimum community score for BUY")
     parser.add_argument("--sol-per-trade", type=float, default=0.05, help="SOL per DEX trade")
+    parser.add_argument("--stream", action="store_true", help="Use live Helius websocket stream for Pump.fun token events")
+    parser.add_argument("--max-events", type=int, default=None, help="Stop stream after N processed events")
+    parser.add_argument("--metrics-port", type=int, default=8000, help="Prometheus metrics port; use 0 to disable")
+    parser.add_argument("--output", type=Path, default=Path("data"), help="Directory for latest stream/pipeline state")
     args = parser.parse_args()
 
-    print(f"=== run_pipeline.py | mode={args.mode} | continuous={args.continuous} ===")
+    print(f"=== run_pipeline.py | mode={args.mode} | continuous={args.continuous} | stream={args.stream} ===")
+
+    if args.stream:
+        start_metrics_server(args.metrics_port)
+        summary = asyncio.run(
+            run_streaming_prelaunch_pipeline(
+                output_dir=args.output,
+                max_events=args.max_events,
+            )
+        )
+        print(json.dumps(summary, indent=2))
+        return
 
     if args.continuous:
         run_continuous_pipeline(

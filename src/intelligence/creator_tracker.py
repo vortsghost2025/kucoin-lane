@@ -36,6 +36,18 @@ from .social.scorer import SocialSignalScorer, SocialScore
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _append_tag(tags: List[str], tag: str) -> None:
+    if tag and tag not in tags:
+        tags.append(tag)
+
 DEFAULT_CREATOR_DB_PATH = "data/creator_registry.json"
 DEFAULT_FACTORY_ADDRESSES = {
     "pump_fun": "6EjD2wSYh2h2cDq4sJdb1Ws0DLsrF966DyUv7nD5QB7n",
@@ -292,6 +304,8 @@ class CreatorTrackerAgent(BaseAgent):
                     "factory": token_data.get("factory", "pump_fun"),
                 })
 
+            self._merge_external_creator_intelligence(profile, token_data)
+
             self._enrich_social_links_from_pumpfun(profile, token_data)
             self._run_safety_check_from_pumpfun(profile, token_data)
             self._update_reputation(profile, token_data)
@@ -357,8 +371,26 @@ class CreatorTrackerAgent(BaseAgent):
             elif isinstance(handles, str):
                 flat_social[platform] = handles
 
-        community_score = token_data.get("community_score", 0.0)
+        community_score = _safe_float(token_data.get("community_score", 0.0))
         pre_launch_tier = token_data.get("pre_launch_tier", "NOISE")
+        external_reputation = _safe_float(token_data.get("creator_reputation", 0.0))
+        initial_reputation = min(1.0, max(community_score * 0.3, external_reputation))
+        external_intel = token_data.get("external_creator_intelligence", {})
+        if not isinstance(external_intel, dict):
+            external_intel = {}
+        creator_tags = [str(tag) for tag in token_data.get("creator_tags", []) if tag]
+
+        performance_metrics = {
+            "avg_score": community_score,
+            "pre_launch_tier": pre_launch_tier,
+        }
+        if external_intel:
+            performance_metrics.update({
+                "external_historical_token_count": external_intel.get("historical_token_count", 0),
+                "external_cross_wallet_hits": external_intel.get("cross_wallet_hits", 0),
+                "external_sources": len(external_intel.get("source_names", [])),
+                "external_creator_tags": creator_tags,
+            })
 
         return CreatorProfile(
             creator_id=creator_id,
@@ -372,10 +404,31 @@ class CreatorTrackerAgent(BaseAgent):
                 "signal": "PUMPFUN_NEW",
                 "factory": factory,
             }],
-            performance_metrics={"avg_score": community_score, "pre_launch_tier": pre_launch_tier},
+            performance_metrics=performance_metrics,
             social_links=flat_social,
-            reputation_score=min(1.0, community_score * 0.3),
+            reputation_score=initial_reputation,
+            tags=creator_tags,
         )
+
+    def _merge_external_creator_intelligence(self, profile: CreatorProfile, token_data: Dict) -> None:
+        external_intel = token_data.get("external_creator_intelligence", {})
+        if not isinstance(external_intel, dict):
+            external_intel = {}
+
+        external_reputation = _safe_float(token_data.get("creator_reputation", 0.0))
+        if external_reputation > profile.reputation_score:
+            profile.reputation_score = min(1.0, round(external_reputation, 4))
+
+        creator_tags = [str(tag) for tag in token_data.get("creator_tags", []) if tag]
+        if creator_tags:
+            profile.performance_metrics["external_creator_tags"] = creator_tags
+            for tag in creator_tags:
+                _append_tag(profile.tags, tag)
+
+        if external_intel:
+            profile.performance_metrics["external_historical_token_count"] = external_intel.get("historical_token_count", 0)
+            profile.performance_metrics["external_cross_wallet_hits"] = external_intel.get("cross_wallet_hits", 0)
+            profile.performance_metrics["external_sources"] = len(external_intel.get("source_names", []))
 
     def _extract_social_links_from_signal(self, signal: Dict) -> Dict[str, str]:
         links = {}
@@ -530,6 +583,9 @@ class CreatorTrackerAgent(BaseAgent):
             # Preserve existing reputation (set during profile creation)
             profile.reputation_score = round(profile.reputation_score, 4)
 
+        external_tags = [str(tag) for tag in profile.performance_metrics.get("external_creator_tags", []) if tag]
+        external_history = int(_safe_float(profile.performance_metrics.get("external_historical_token_count", 0)))
+
         # Retain existing tag logic based on new reputation score
         profile.tags = [t for t in profile.tags if t not in ("alpha", "repeat", "risky", "high_frequency", "serial_launcher")]
         if profile.reputation_score > 0.8:
@@ -542,21 +598,12 @@ class CreatorTrackerAgent(BaseAgent):
             profile.tags.append("high_frequency")
         if len(history) >= 10:
             profile.tags.append("serial_launcher")
-
-        n_social = len(profile.social_links)
-        profile.performance_metrics["n_social_platforms"] = n_social
-
-        profile.tags = [t for t in profile.tags if t not in ("alpha", "repeat", "risky", "high_frequency", "serial_launcher")]
-        if profile.reputation_score > 0.8:
-            profile.tags.append("alpha")
-        elif profile.reputation_score > 0.5:
-            profile.tags.append("repeat")
-        if profile.safety_summary.get("avoid"):
-            profile.tags.append("risky")
-        if len(history) >= 5:
-            profile.tags.append("high_frequency")
-        if len(history) >= 10:
-            profile.tags.append("serial_launcher")
+        if external_history >= 3:
+            _append_tag(profile.tags, "high_frequency")
+        if external_history >= 5:
+            _append_tag(profile.tags, "serial_launcher")
+        for tag in external_tags:
+            _append_tag(profile.tags, tag)
 
         n_social = len(profile.social_links)
         profile.performance_metrics["n_social_platforms"] = n_social

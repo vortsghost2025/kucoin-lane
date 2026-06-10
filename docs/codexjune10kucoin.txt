@@ -1,0 +1,27 @@
+Determining sync necessity
+
+I need to clarify whether the work should be synced to the headless. Here’s the breakdown: both the local and headless are from the same repo but have different working trees. I’ve verified that the headless currently shows MISSING_LIVE_STREAM. So, if the headless should use real-time stream or metrics changes, then yes, it needs syncing. If you’re just validating local code or leaving the existing polling running, then no. The current headless agent won’t include the new live stream changes and requires a restart to activate them.
+
+Yes. Same repo, but separate working copy.
+
+I checked headless:
+
+~/agent/repos/kucoin-lane does not have src/intelligence/live_prelaunch_stream.py yet.
+
+So the work needs syncing to headless if you want the headless autonomous agent to use the new real-time stream path. The currently running headless polling pipelines can keep running as-is, but they are not using the new Helius websocket / live creator-intel code.
+
+Files to sync:
+
+run_pipeline.py dashboard.sh .gitignore src/intelligence/live_prelaunch_stream.py src/intelligence/creator_tracker.py src/intelligence/chain/helius_provider.py src/intelligence/trading_decision.py src/monitoring/metrics.py src/execution/dex_jupiter_executor.py tests/intelligence/test_live_prelaunch_stream.py
+
+Important: headless has its own dirty runtime files:
+
+heartbeat-kucoin.json fix_wrapper.py
+
+I would not touch those.
+
+After syncing, activation would require starting the stream mode separately, for example:
+
+python run_pipeline.py --stream --metrics-port 8001
+
+Use 8001 because the existing creator pipeline may already be using Prometheus port 8000.

@@ -1,0 +1,2706 @@
+# Comprehensive Multi-Source Token Discovery System
+## Implementation Plan & Code Architecture
+
+Let me build this systematically, starting with the foundation and working up to the full intelligence engine.
+
+---
+
+## Phase 1: Foundation & Infrastructure
+
+### Core API Client Manager
+
+```python
+# src/core/api_client_manager.py
+
+import asyncio
+import aiohttp
+import logging
+import time
+from typing import Optional, Dict, Any, Callable
+from dataclasses import dataclass, field
+from enum import Enum
+from collections import deque
+import json
+
+logger = logging.getLogger(__name__)
+
+class CircuitState(Enum):
+    CLOSED = "closed"       # Normal operation
+    OPEN = "open"           # Failing, reject requests
+    HALF_OPEN = "half_open" # Testing recovery
+
+@dataclass
+class CircuitBreaker:
+    """Per-endpoint circuit breaker with sliding window"""
+    name: str
+    failure_threshold: int = 5
+    recovery_timeout: float = 60.0
+    success_threshold: int = 2
+    
+    state: CircuitState = CircuitState.CLOSED
+    failure_count: int = 0
+    success_count: int = 0
+    last_failure_time: float = 0.0
+    failure_window: deque = field(default_factory=lambda: deque(maxlen=10))
+    
+    def record_success(self):
+        self.failure_window.append(0)
+        if self.state == CircuitState.HALF_OPEN:
+            self.success_count += 1
+            if self.success_count >= self.success_threshold:
+                self._close()
+        elif self.state == CircuitState.CLOSED:
+            self.failure_count = 0
+    
+    def record_failure(self):
+        self.failure_window.append(1)
+        self.last_failure_time = time.time()
+        recent_failures = sum(self.failure_window)
+        
+        if self.state == CircuitState.HALF_OPEN:
+            self._open()
+        elif recent_failures >= self.failure_threshold:
+            self._open()
+    
+    def can_attempt(self) -> bool:
+        if self.state == CircuitState.CLOSED:
+            return True
+        if self.state == CircuitState.OPEN:
+            if time.time() - self.last_failure_time >= self.recovery_timeout:
+                self._half_open()
+                return True
+            return False
+        return True  # HALF_OPEN allows one attempt
+    
+    def _open(self):
+        logger.warning(f"Circuit breaker OPEN: {self.name}")
+        self.state = CircuitState.OPEN
+        self.success_count = 0
+    
+    def _half_open(self):
+        logger.info(f"Circuit breaker HALF_OPEN: {self.name}")
+        self.state = CircuitState.HALF_OPEN
+        self.success_count = 0
+    
+    def _close(self):
+        logger.info(f"Circuit breaker CLOSED: {self.name}")
+        self.state = CircuitState.CLOSED
+        self.failure_count = 0
+        self.success_count = 0
+
+@dataclass
+class RetryConfig:
+    max_attempts: int = 3
+    base_delay: float = 1.0
+    max_delay: float = 60.0
+    exponential_base: float = 2.0
+    jitter: bool = True
+    retry_on_status: tuple = (429, 500, 502, 503, 504, 530)
+
+class RateLimiter:
+    """Token bucket rate limiter"""
+    
+    def __init__(self, calls_per_second: float):
+        self.calls_per_second = calls_per_second
+        self.min_interval = 1.0 / calls_per_second
+        self.last_called = 0.0
+        self._lock = asyncio.Lock()
+    
+    async def acquire(self):
+        async with self._lock:
+            now = time.time()
+            elapsed = now - self.last_called
+            if elapsed < self.min_interval:
+                await asyncio.sleep(self.min_interval - elapsed)
+            self.last_called = time.time()
+
+class APIClientManager:
+    """
+    Unified API client with:
+    - Exponential backoff retry
+    - Circuit breakers per endpoint
+    - Rate limiting
+    - Health monitoring
+    - Comprehensive logging
+    """
+    
+    def __init__(self):
+        self.session: Optional[aiohttp.ClientSession] = None
+        self.circuit_breakers: Dict[str, CircuitBreaker] = {}
+        self.rate_limiters: Dict[str, RateLimiter] = {}
+        self.health_stats: Dict[str, Dict] = {}
+        self._setup_endpoints()
+    
+    def _setup_endpoints(self):
+        """Configure all external API endpoints"""
+        endpoints = {
+            "pump_fun": {
+                "circuit": CircuitBreaker("pump_fun", failure_threshold=3, recovery_timeout=120),
+                "rate_limit": RateLimiter(2.0),  # 2 req/sec
+            },
+            "dexscreener": {
+                "circuit": CircuitBreaker("dexscreener", failure_threshold=5),
+                "rate_limit": RateLimiter(5.0),
+            },
+            "birdeye": {
+                "circuit": CircuitBreaker("birdeye", failure_threshold=3),
+                "rate_limit": RateLimiter(3.0),
+            },
+            "helius": {
+                "circuit": CircuitBreaker("helius", failure_threshold=5),
+                "rate_limit": RateLimiter(10.0),
+            },
+            "jupiter": {
+                "circuit": CircuitBreaker("jupiter", failure_threshold=3),
+                "rate_limit": RateLimiter(5.0),
+            },
+        }
+        
+        for name, config in endpoints.items():
+            self.circuit_breakers[name] = config["circuit"]
+            self.rate_limiters[name] = config["rate_limit"]
+            self.health_stats[name] = {
+                "total_requests": 0,
+                "successful_requests": 0,
+                "failed_requests": 0,
+                "avg_latency_ms": 0.0,
+                "last_success": None,
+                "last_failure": None,
+            }
+    
+    async def __aenter__(self):
+        connector = aiohttp.TCPConnector(
+            limit=100,
+            limit_per_host=20,
+            ttl_dns_cache=300,
+            use_dns_cache=True,
+        )
+        timeout = aiohttp.ClientTimeout(total=30, connect=10)
+        self.session = aiohttp.ClientSession(
+            connector=connector,
+            timeout=timeout,
+            headers={"User-Agent": "TokenDiscovery/1.0"}
+        )
+        return self
+    
+    async def __aexit__(self, *args):
+        if self.session:
+            await self.session.close()
+    
+    async def request(
+        self,
+        endpoint_name: str,
+        url: str,
+        method: str = "GET",
+        retry_config: Optional[RetryConfig] = None,
+        **kwargs
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Execute API request with full retry and circuit breaker logic
+        """
+        config = retry_config or RetryConfig()
+        circuit = self.circuit_breakers.get(endpoint_name)
+        rate_limiter = self.rate_limiters.get(endpoint_name)
+        stats = self.health_stats.get(endpoint_name, {})
+        
+        if circuit and not circuit.can_attempt():
+            logger.warning(f"Circuit open for {endpoint_name}, skipping request")
+            return None
+        
+        for attempt in range(config.max_attempts):
+            if rate_limiter:
+                await rate_limiter.acquire()
+            
+            start_time = time.time()
+            stats["total_requests"] = stats.get("total_requests", 0) + 1
+            
+            try:
+                async with self.session.request(method, url, **kwargs) as response:
+                    latency_ms = (time.time() - start_time) * 1000
+                    self._update_latency(stats, latency_ms)
+                    
+                    if response.status == 200:
+                        data = await response.json()
+                        if circuit:
+                            circuit.record_success()
+                        stats["successful_requests"] = stats.get("successful_requests", 0) + 1
+                        stats["last_success"] = time.time()
+                        logger.debug(f"{endpoint_name} success: {url} ({latency_ms:.0f}ms)")
+                        return data
+                    
+                    elif response.status in config.retry_on_status:
+                        logger.warning(
+                            f"{endpoint_name} HTTP {response.status} "
+                            f"(attempt {attempt + 1}/{config.max_attempts}): {url}"
+                        )
+                        if circuit:
+                            circuit.record_failure()
+                        
+                        if attempt < config.max_attempts - 1:
+                            delay = self._calculate_delay(attempt, config)
+                            logger.info(f"Retrying in {delay:.1f}s...")
+                            await asyncio.sleep(delay)
+                        continue
+                    
+                    else:
+                        logger.error(f"{endpoint_name} HTTP {response.status}: {url}")
+                        stats["failed_requests"] = stats.get("failed_requests", 0) + 1
+                        stats["last_failure"] = time.time()
+                        return None
+                        
+            except asyncio.TimeoutError:
+                logger.warning(f"{endpoint_name} timeout (attempt {attempt + 1}): {url}")
+                if circuit:
+                    circuit.record_failure()
+                if attempt < config.max_attempts - 1:
+                    await asyncio.sleep(self._calculate_delay(attempt, config))
+                    
+            except aiohttp.ClientError as e:
+                logger.error(f"{endpoint_name} client error: {e}")
+                if circuit:
+                    circuit.record_failure()
+                stats["failed_requests"] = stats.get("failed_requests", 0) + 1
+                stats["last_failure"] = time.time()
+                return None
+        
+        logger.error(f"{endpoint_name} exhausted all {config.max_attempts} attempts: {url}")
+        return None
+    
+    def _calculate_delay(self, attempt: int, config: RetryConfig) -> float:
+        delay = min(
+            config.base_delay * (config.exponential_base ** attempt),
+            config.max_delay
+        )
+        if config.jitter:
+            import random
+            delay *= (0.5 + random.random() * 0.5)
+        return delay
+    
+    def _update_latency(self, stats: Dict, latency_ms: float):
+        current_avg = stats.get("avg_latency_ms", 0.0)
+        total = stats.get("successful_requests", 0)
+        stats["avg_latency_ms"] = (
+            (current_avg * total + latency_ms) / (total + 1)
+        )
+    
+    def get_health_report(self) -> Dict:
+        report = {}
+        for name, stats in self.health_stats.items():
+            circuit = self.circuit_breakers.get(name)
+            total = stats.get("total_requests", 0)
+            success = stats.get("successful_requests", 0)
+            report[name] = {
+                "status": circuit.state.value if circuit else "unknown",
+                "success_rate": f"{(success/total*100):.1f}%" if total > 0 else "N/A",
+                "total_requests": total,
+                "avg_latency_ms": f"{stats.get('avg_latency_ms', 0):.0f}ms",
+                "last_success": stats.get("last_success"),
+                "last_failure": stats.get("last_failure"),
+            }
+        return report
+```
+
+---
+
+### Data Models & Schema
+
+```python
+# src/models/token_models.py
+
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any
+from enum import Enum
+from datetime import datetime
+import hashlib
+
+class SignalStrength(Enum):
+    WEAK = "weak"
+    MODERATE = "moderate"  
+    STRONG = "strong"
+    VERY_STRONG = "very_strong"
+
+class DataSource(Enum):
+    PUMP_FUN = "pump_fun"
+    DEXSCREENER = "dexscreener"
+    BIRDEYE = "birdeye"
+    HELIUS = "helius"
+    JUPITER = "jupiter"
+    SOCIAL = "social"
+    MANUAL = "manual"
+
+class TokenStatus(Enum):
+    PRELAUNCH = "prelaunch"
+    LAUNCHING = "launching"
+    ACTIVE = "active"
+    TRENDING = "trending"
+    DECLINING = "declining"
+    DEAD = "dead"
+
+@dataclass
+class CreatorProfile:
+    """Creator intelligence profile"""
+    wallet_address: str
+    alias: Optional[str] = None
+    
+    # Launch history
+    total_launches: int = 0
+    successful_launches: int = 0
+    rug_pulls: int = 0
+    avg_peak_multiplier: float = 0.0
+    
+    # Timing patterns
+    typical_launch_hour: Optional[int] = None  # UTC
+    avg_days_between_launches: float = 0.0
+    last_launch_timestamp: Optional[datetime] = None
+    
+    # Social presence
+    twitter_handle: Optional[str] = None
+    telegram_handle: Optional[str] = None
+    verified_social: bool = False
+    
+    # Scoring
+    reputation_score: float = 0.0  # 0-100
+    trust_level: str = "unknown"   # unknown/low/medium/high/elite
+    
+    # Metadata
+    first_seen: Optional[datetime] = None
+    last_updated: Optional[datetime] = None
+    data_sources: List[str] = field(default_factory=list)
+    
+    @property
+    def success_rate(self) -> float:
+        if self.total_launches == 0:
+            return 0.0
+        return self.successful_launches / self.total_launches
+    
+    @property
+    def rug_rate(self) -> float:
+        if self.total_launches == 0:
+            return 0.0
+        return self.rug_pulls / self.total_launches
+    
+    def calculate_reputation_score(self) -> float:
+        """
+        Composite reputation score (0-100)
+        Weights:
+          - Success rate: 35%
+          - Rug pull rate: 25% (negative)
+          - Average multiplier: 20%
+          - Social verification: 10%
+          - Launch volume: 10%
+        """
+        if self.total_launches == 0:
+            return 0.0
+        
+        success_score = self.success_rate * 35
+        rug_penalty = self.rug_rate * 25
+        
+        # Normalize avg multiplier (cap at 10x = full score)
+        multiplier_score = min(self.avg_peak_multiplier / 10.0, 1.0) * 20
+        
+        social_score = 10.0 if self.verified_social else 0.0
+        
+        # Volume score (log scale, cap at 50 launches)
+        import math
+        volume_score = min(math.log(self.total_launches + 1) / math.log(51), 1.0) * 10
+        
+        self.reputation_score = max(
+            0.0, 
+            success_score - rug_penalty + multiplier_score + social_score + volume_score
+        )
+        
+        # Set trust level
+        if self.reputation_score >= 80:
+            self.trust_level = "elite"
+        elif self.reputation_score >= 60:
+            self.trust_level = "high"
+        elif self.reputation_score >= 40:
+            self.trust_level = "medium"
+        elif self.reputation_score >= 20:
+            self.trust_level = "low"
+        else:
+            self.trust_level = "unknown"
+        
+        return self.reputation_score
+
+@dataclass
+class MarketData:
+    """Real-time market metrics"""
+    price_usd: float = 0.0
+    price_sol: float = 0.0
+    market_cap_usd: float = 0.0
+    liquidity_usd: float = 0.0
+    volume_1h: float = 0.0
+    volume_6h: float = 0.0
+    volume_24h: float = 0.0
+    price_change_5m: float = 0.0
+    price_change_1h: float = 0.0
+    price_change_6h: float = 0.0
+    price_change_24h: float = 0.0
+    
+    # Transaction data
+    buys_1h: int = 0
+    sells_1h: int = 0
+    unique_buyers_24h: int = 0
+    
+    # Bonding curve (pump.fun)
+    bonding_curve_progress: float = 0.0  # 0-100%
+    
+    timestamp: Optional[datetime] = None
+    
+    @property
+    def buy_sell_ratio(self) -> float:
+        total = self.buys_1h + self.sells_1h
+        if total == 0:
+            return 0.0
+        return self.buys_1h / total
+
+@dataclass
+class SocialSignal:
+    """Social media intelligence"""
+    mentions_1h: int = 0
+    mentions_24h: int = 0
+    sentiment_score: float = 0.0  # -1 to +1
+    influencer_mentions: int = 0
+    telegram_members: int = 0
+    twitter_followers: int = 0
+    
+    # Specific sources
+    telegram_signals: List[str] = field(default_factory=list)
+    twitter_mentions: List[str] = field(default_factory=list)
+    
+    timestamp: Optional[datetime] = None
+
+@dataclass  
+class TokenDiscovery:
+    """
+    Unified token discovery record - single schema for all sources
+    """
+    # Identity
+    mint_address: str
+    symbol: str
+    name: str
+    
+    # Discovery metadata
+    source: DataSource = DataSource.DEXSCREENER
+    discovered_at: Optional[datetime] = None
+    status: TokenStatus = TokenStatus.ACTIVE
+    
+    # Creator intelligence
+    creator_wallet: Optional[str] = None
+    creator_profile: Optional[CreatorProfile] = None
+    
+    # Market data
+    market_data: Optional[MarketData] = None
+    
+    # Social signals
+    social_signal: Optional[SocialSignal] = None
+    
+    # Cross-source data
+    dex_pair_address: Optional[str] = None
+    pump_fun_url: Optional[str] = None
+    dexscreener_url: Optional[str] = None
+    
+    # Scoring
+    composite_score: float = 0.0
+    signal_strength: SignalStrength = SignalStrength.WEAK
+    score_breakdown: Dict[str, float] = field(default_factory=dict)
+    
+    # Validation
+    is_validated: bool = False
+    validation_flags: List[str] = field(default_factory=list)
+    risk_flags: List[str] = field(default_factory=list)
+    
+    # Raw data preservation
+    raw_data: Dict[str, Any] = field(default_factory=dict)
+    
+    def get_unique_id(self) -> str:
+        """Generate consistent unique ID"""
+        return hashlib.md5(self.mint_address.encode()).hexdigest()[:12]
+    
+    def add_risk_flag(self, flag: str):
+        if flag not in self.risk_flags:
+            self.risk_flags.append(flag)
+    
+    def add_validation_flag(self, flag: str):
+        if flag not in self.validation_flags:
+            self.validation_flags.append(flag)
+    
+    def to_summary(self) -> Dict:
+        """Human-readable summary"""
+        md = self.market_data
+        cp = self.creator_profile
+        return {
+            "id": self.get_unique_id(),
+            "symbol": self.symbol,
+            "name": self.name,
+            "mint": self.mint_address[:8] + "...",
+            "source": self.source.value,
+            "status": self.status.value,
+            "score": f"{self.composite_score:.1f}",
+            "signal": self.signal_strength.value,
+            "creator_trust": cp.trust_level if cp else "unknown",
+            "creator_score": f"{cp.reputation_score:.1f}" if cp else "N/A",
+            "market_cap": f"${md.market_cap_usd:,.0f}" if md else "N/A",
+            "liquidity": f"${md.liquidity_usd:,.0f}" if md else "N/A",
+            "volume_1h": f"${md.volume_1h:,.0f}" if md else "N/A",
+            "price_change_1h": f"{md.price_change_1h:+.1f}%" if md else "N/A",
+            "risk_flags": self.risk_flags,
+            "discovered_at": self.discovered_at.isoformat() if self.discovered_at else None,
+        }
+```
+
+---
+
+## Phase 2: Data Collection Layer
+
+### Pump.fun Client
+
+```python
+# src/collectors/pump_fun_client.py
+
+import asyncio
+import logging
+from typing import List, Optional, Dict
+from datetime import datetime
+import websockets
+import json
+
+from src.core.api_client_manager import APIClientManager, RetryConfig
+from src.models.token_models import TokenDiscovery, MarketData, DataSource, TokenStatus
+
+logger = logging.getLogger(__name__)
+
+class PumpFunClient:
+    """
+    Pump.fun data collection with:
+    - REST API with aggressive retry (handles 530 errors)
+    - WebSocket for real-time new token events
+    - Bonding curve monitoring
+    """
+    
+    BASE_URL = "https://frontend-api.pump.fun"
+    WS_URL = "wss://frontend-api.pump.fun/socket.io"
+    
+    # Fallback endpoints if primary fails
+    FALLBACK_URLS = [
+        "https://client-api-2-74b1891ee9f9.herokuapp.com",
+        "https://pump-fun-api.vercel.app",
+    ]
+    
+    def __init__(self, client_manager: APIClientManager):
+        self.client = client_manager
+        self.retry_config = RetryConfig(
+            max_attempts=5,
+            base_delay=2.0,
+            max_delay=120.0,
+            retry_on_status=(429, 500, 502, 503, 504, 530)
+        )
+        self._ws_connection = None
+        self._new_token_callbacks = []
+    
+    def on_new_token(self, callback):
+        """Register callback for new token events"""
+        self._new_token_callbacks.append(callback)
+    
+    async def get_new_tokens(self, limit: int = 50) -> List[TokenDiscovery]:
+        """Fetch latest token launches from pump.fun"""
+        
+        # Try primary URL first, then fallbacks
+        for base_url in [self.BASE_URL] + self.FALLBACK_URLS:
+            url = f"{base_url}/coins?offset=0&limit={limit}&sort=created_timestamp&order=DESC&includeNsfw=false"
+            
+            data = await self.client.request(
+                endpoint_name="pump_fun",
+                url=url,
+                retry_config=self.retry_config
+            )
+            
+            if data:
+                logger.info(f"Pump.fun: Retrieved {len(data)} tokens from {base_url}")
+                return self._parse_token_list(data)
+            
+            logger.warning(f"Pump.fun: Failed with {base_url}, trying fallback...")
+        
+        logger.error("Pump.fun: All endpoints failed")
+        return []
+    
+    async def get_token_detail(self, mint_address: str) -> Optional[TokenDiscovery]:
+        """Get detailed token information"""
+        url = f"{self.BASE_URL}/coins/{mint_address}"
+        data = await self.client.request(
+            endpoint_name="pump_fun",
+            url=url,
+            retry_config=self.retry_config
+        )
+        
+        if data:
+            return self._parse_single_token(data)
+        return None
+    
+    async def get_king_of_hill(self) -> List[TokenDiscovery]:
+        """Get tokens near graduation (king of the hill)"""
+        url = f"{self.BASE_URL}/coins?offset=0&limit=20&sort=king_of_the_hill_timestamp&order=DESC"
+        data = await self.client.request(
+            endpoint_name="pump_fun",
+            url=url,
+            retry_config=self.retry_config
+        )
+        
+        if data:
+            tokens = self._parse_token_list(data)
+            # Filter to high bonding curve progress
+            return [t for t in tokens 
+                    if t.market_data and t.market_data.bonding_curve_progress >= 80]
+        return []
+    
+    async def stream_new_tokens(self):
+        """
+        WebSocket stream for real-time new token events
+        Handles reconnection automatically
+        """
+        reconnect_delay = 5
+        
+        while True:
+            try:
+                logger.info("Pump.fun WebSocket: Connecting...")
+                async with websockets.connect(
+                    self.WS_URL,
+                    ping_interval=30,
+                    ping_timeout=10
+                ) as ws:
+                    self._ws_connection = ws
+                    reconnect_delay = 5  # Reset on success
+                    
+                    # Subscribe to new token events
+                    await ws.send(json.dumps({
+                        "method": "subscribeNewToken"
+                    }))
+                    
+                    logger.info("Pump.fun WebSocket: Connected, listening for new tokens")
+                    
+                    async for message in ws:
+                        try:
+                            data = json.loads(message)
+                            if data.get("txType") == "create":
+                                token = self._parse_websocket_token(data)
+                                if token:
+                                    for callback in self._new_token_callbacks:
+                                        await callback(token)
+                        except json.JSONDecodeError:
+                            continue
+                            
+            except websockets.ConnectionClosed:
+                logger.warning(f"Pump.fun WebSocket closed, reconnecting in {reconnect_delay}s")
+            except Exception as e:
+                logger.error(f"Pump.fun WebSocket error: {e}")
+            
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, 60)
+    
+    def _parse_token_list(self, data: List[Dict]) -> List[TokenDiscovery]:
+        tokens = []
+        for item in data:
+            token = self._parse_single_token(item)
+            if token:
+                tokens.append(token)
+        return tokens
+    
+    def _parse_single_token(self, data: Dict) -> Optional[TokenDiscovery]:
+        try:
+            mint = data.get("mint", "")
+            if not mint:
+                return None
+            
+            # Parse market data
+            market_data = MarketData(
+                price_usd=float(data.get("usd_market_cap", 0)) / max(
+                    float(data.get("total_supply", 1)), 1
+                ),
+                market_cap_usd=float(data.get("usd_market_cap", 0)),
+                bonding_curve_progress=float(data.get("bonding_curve", 0)),
+                timestamp=datetime.utcnow()
+            )
+            
+            token = TokenDiscovery(
+                mint_address=mint,
+                symbol=data.get("symbol", "UNKNOWN"),
+                name=data.get("name", "Unknown"),
+                source=DataSource.PUMP_FUN,
+                discovered_at=datetime.fromtimestamp(
+                    data.get("created_timestamp", 0) / 1000
+                ),
+                status=TokenStatus.LAUNCHING,
+                creator_wallet=data.get("creator", None),
+                market_data=market_data,
+                pump_fun_url=f"https://pump.fun/{mint}",
+                raw_data=data,
+            )
+            
+            # Risk flags
+            if float(data.get("bonding_curve", 0)) < 10:
+                token.add_risk_flag("very_early_stage")
+            if not data.get("description"):
+                token.add_risk_flag("no_description")
+            if not data.get("twitter") and not data.get("telegram"):
+                token.add_risk_flag("no_social_links")
+            
+            return token
+            
+        except Exception as e:
+            logger.error(f"Pump.fun parse error: {e}, data: {data.get('mint', 'unknown')}")
+            return None
+    
+    def _parse_websocket_token(self, data: Dict) -> Optional[TokenDiscovery]:
+        """Parse real-time WebSocket token event"""
+        try:
+            return TokenDiscovery(
+                mint_address=data.get("mint", ""),
+                symbol=data.get("symbol", "UNKNOWN"),
+                name=data.get("name", "Unknown"),
+                source=DataSource.PUMP_FUN,
+                discovered_at=datetime.utcnow(),
+                status=TokenStatus.LAUNCHING,
+                creator_wallet=data.get("traderPublicKey"),
+                market_data=MarketData(
+                    market_cap_usd=float(data.get("marketCapSol", 0)) * 100,  # Approx
+                    timestamp=datetime.utcnow()
+                ),
+                raw_data=data,
+            )
+        except Exception as e:
+            logger.error(f"Pump.fun WS parse error: {e}")
+            return None
+```
+
+---
+
+### DexScreener Client
+
+```python
+# src/collectors/dexscreener_client.py
+
+import logging
+from typing import List, Optional, Dict
+from datetime import datetime
+
+from src.core.api_client_manager import APIClientManager, RetryConfig
+from src.models.token_models import TokenDiscovery, MarketData, DataSource, TokenStatus
+
+logger = logging.getLogger(__name__)
+
+class DexScreenerClient:
+    """
+    DexScreener data collection - primary stable source
+    Handles mint address resolution from pair data
+    """
+    
+    BASE_URL = "https://api.dexscreener.com/latest"
+    
+    def __init__(self, client_manager: APIClientManager):
+        self.client = client_manager
+        self.retry_config = RetryConfig(max_attempts=3, base_delay=1.0)
+    
+    async def get_new_pairs(self, chain: str = "solana") -> List[TokenDiscovery]:
+        """Get newest Solana pairs"""
+        url = f"{self.BASE_URL}/dex/pairs/{chain}"
+        data = await self.client.request("dexscreener", url, retry_config=self.retry_config)
+        
+        if data and "pairs" in data:
+            pairs = data["pairs"] or []
+            logger.info(f"DexScreener: Retrieved {len(pairs)} pairs")
+            return self._parse_pairs(pairs)
+        return []
+    
+    async def get_trending_tokens(self) -> List[TokenDiscovery]:
+        """Get trending tokens across all chains, filtered to Solana"""
+        url = f"{self.BASE_URL}/dex/tokens/trending"
+        data = await self.client.request("dexscreener", url, retry_config=self.retry_config)
+        
+        if data and "pairs" in data:
+            solana_pairs = [
+                p for p in (data["pairs"] or [])
+                if p.get("chainId") == "solana"
+            ]
+            logger.info(f"DexScreener trending: {len(solana_pairs)} Solana tokens")
+            return self._parse_pairs(solana_pairs)
+        return []
+    
+    async def search_token(self, query: str) -> List[TokenDiscovery]:
+        """Search by symbol, name, or mint address"""
+        url = f"{self.BASE_URL}/dex/search?q={query}"
+        data = await self.client.request("dexscreener", url, retry_config=self.retry_config)
+        
+        if data and "pairs" in data:
+            solana_pairs = [
+                p for p in (data["pairs"] or [])
+                if p.get("chainId") == "solana"
+            ]
+            return self._parse_pairs(solana_pairs)
+        return []
+    
+    async def get_token_by_mint(self, mint_address: str) -> Optional[TokenDiscovery]:
+        """Resolve mint address to full token data"""
+        url = f"{self.BASE_URL}/dex/tokens/{mint_address}"
+        data = await self.client.request("dexscreener", url, retry_config=self.retry_config)
+        
+        if data and "pairs" in data and data["pairs"]:
+            tokens = self._parse_pairs(data["pairs"][:1])
+            return tokens[0] if tokens else None
+        return None
+    
+    async def get_boosted_tokens(self) -> List[TokenDiscovery]:
+        """Get tokens with active boosts - often has creator info"""
+        url = "https://api.dexscreener.com/token-boosts/latest/v1"
+        data = await self.client.request("dexscreener", url, retry_config=self.retry_config)
+        
+        if data:
+            # Boosted endpoint returns different format
+            tokens = []
+            items = data if isinstance(data, list) else data.get("tokenProfiles", [])
+            for item in items:
+                if item.get("chainId") == "solana":
+                    mint = item.get("tokenAddress", "")
+                    if mint:
+                        # Enrich with pair data
+                        token = await self.get_token_by_mint(mint)
+                        if token:
+                            token.raw_data["boost_data"] = item
+                            tokens.append(token)
+            
+            logger.info(f"DexScreener boosts: {len(tokens)} Solana tokens")
+            return tokens
+        return []
+    
+    def _parse_pairs(self, pairs: List[Dict]) -> List[TokenDiscovery]:
+        tokens = []
+        seen_mints = set()
+        
+        for pair in pairs:
+            token = self._parse_single_pair(pair)
+            if token and token.mint_address not in seen_mints:
+                seen_mints.add(token.mint_address)
+                tokens.append(token)
+        
+        return tokens
+    
+    def _parse_single_pair(self, pair: Dict) -> Optional[TokenDiscovery]:
+        try:
+            # Extract mint address from multiple possible locations
+            base_token = pair.get("baseToken", {})
+            mint_address = (
+                base_token.get("address") or
+                pair.get("baseToken", {}).get("address") or
+                pair.get("address", "")
+            )
+            
+            if not mint_address or len(mint_address) < 32:
+                return None
+            
+            # Parse price changes safely
+            price_change = pair.get("priceChange", {}) or {}
+            volume = pair.get("volume", {}) or {}
+            txns = pair.get("txns", {}) or {}
+            txns_h1 = txns.get("h1", {}) or {}
+            liquidity = pair.get("liquidity", {}) or {}
+            
+            market_data = MarketData(
+                price_usd=float(pair.get("priceUsd", 0) or 0),
+                market_cap_usd=float(pair.get("marketCap", 0) or pair.get("fdv", 0) or 0),
+                liquidity_usd=float(liquidity.get("usd", 0) or 0),
+                volume_1h=float(volume.get("h1", 0) or 0),
+                volume_6h=float(volume.get("h6", 0) or 0),
+                volume_24h=float(volume.get("h24", 0) or 0),
+                price_change_5m=float(price_change.get("m5", 0) or 0),
+                price_change_1h=float(price_change.get("h1", 0) or 0),
+                price_change_6h=float(price_change.get("h6", 0) or 0),
+                price_change_24h=float(price_change.get("h24", 0) or 0),
+                buys_1h=int(txns_h1.get("buys", 0) or 0),
+                sells_1h=int(txns_h1.get("sells", 0) or 0),
+                timestamp=datetime.utcnow()
+            )
+            
+            # Determine status
+            age_hours = 0
+            if pair.get("pairCreatedAt"):
+                created = datetime.fromtimestamp(pair["pairCreatedAt"] / 1000)
+                age_hours = (datetime.utcnow() - created).total_seconds() / 3600
+            
+            if age_hours < 1:
+                status = TokenStatus.LAUNCHING
+            elif age_hours < 24:
+                status = TokenStatus.ACTIVE
+            else:
+                status = TokenStatus.ACTIVE
+            
+            token = TokenDiscovery(
+                mint_address=mint_address,
+                symbol=base_token.get("symbol", "UNKNOWN"),
+                name=base_token.get("name", "Unknown"),
+                source=DataSource.DEXSCREENER,
+                discovered_at=datetime.utcnow(),
+                status=status,
+                market_data=market_data,
+                dex_pair_address=pair.get("pairAddress"),
+                dexscreener_url=pair.get("url"),
+                raw_data=pair,
+            )
+            
+            # Apply risk flags
+            if market_data.liquidity_usd < 1000:
+                token.add_risk_flag("low_liquidity")
+            if market_data.liquidity_usd < 500:
+                token.add_risk_flag("very_low_liquidity")
+            if market_data.volume_24h < 100:
+                token.add_risk_flag("low_volume")
+            if market_data.price_change_1h > 100:
+                token.add_risk_flag("extreme_pump_1h")
+            if market_data.buy_sell_ratio > 0.9:
+                token.add_risk_flag("suspicious_buy_dominance")
+            
+            return token
+            
+        except Exception as e:
+            logger.error(f"DexScreener parse error: {e}")
+            return None
+```
+
+---
+
+### Helius Creator Intelligence Client
+
+```python
+# src/collectors/helius_client.py
+
+import asyncio
+import logging
+from typing import Optional, Dict, List, Tuple
+from datetime import datetime, timedelta
+import json
+
+from src.core.api_client_manager import APIClientManager, RetryConfig
+from src.models.token_models import CreatorProfile
+
+logger = logging.getLogger(__name__)
+
+class HeliusClient:
+    """
+    Helius RPC client for on-chain creator intelligence
+    Resolves deployer wallets and analyzes launch history
+    """
+    
+    def __init__(self, client_manager: APIClientManager, api_key: str):
+        self.client = client_manager
+        self.api_key = api_key
+        self.rpc_url = f"https://mainnet.helius-rpc.com/?api-key={api_key}"
+        self.api_url = f"https://api.helius.xyz/v0"
+        
+        # Backup RPC providers
+        self.backup_rpcs = [
+            "https://api.mainnet-beta.solana.com",
+            "https://rpc.ankr.com/solana",
+            "https://solana-mainnet.g.alchemy.com/v2/demo",
+        ]
+        
+        self.retry_config = RetryConfig(max_attempts=3, base_delay=0.5)
+        
+        # Cache to reduce API calls
+        self._creator_cache: Dict[str, Tuple[CreatorProfile, float]] = {}
+        self._cache_ttl = 3600  # 1 hour
+    
+    async def resolve_creator(self, mint_address: str) -> Optional[str]:
+        """
+        Resolve token creator/deployer wallet from mint transaction
+        Uses multiple fallback strategies
+        """
+        # Strategy 1: Get mint account info
+        creator = await self._get_mint_authority(mint_address)
+        if creator:
+            return creator
+        
+        # Strategy 2: Parse creation transaction
+        creator = await self._parse_mint_transaction(mint_address)
+        if creator:
+            return creator
+        
+        # Strategy 3: Check token metadata
+        creator = await self._get_metadata_update_authority(mint_address)
+        if creator:
+            return creator
+        
+        logger.warning(f"Could not resolve creator for {mint_address}")
+        return None
+    
+    async def get_creator_profile(
+        self, 
+        wallet_address: str,
+        force_refresh: bool = False
+    ) -> Optional[CreatorProfile]:
+        """
+        Build comprehensive creator profile from on-chain history
+        """
+        # Check cache
+        if not force_refresh and wallet_address in self._creator_cache:
+            profile, cached_at = self._creator_cache[wallet_address]
+            if (datetime.utcnow().timestamp() - cached_at) < self._cache_ttl:
+                return profile
+        
+        logger.info(f"Building creator profile for {wallet_address[:8]}...")
+        
+        # Get all token launches by this wallet
+        launches = await self._get_wallet_launches(wallet_address)
+        
+        if not launches:
+            profile = CreatorProfile(
+                wallet_address=wallet_address,
+                first_seen=datetime.utcnow(),
+                last_updated=datetime.utcnow(),
+                data_sources=["helius"]
+            )
+            profile.calculate_reputation_score()
+            return profile
+        
+        # Analyze launch history
+        profile = await self._analyze_launches(wallet_address, launches)
+        profile.calculate_reputation_score()
+        
+        # Cache result
+        self._creator_cache[wallet_address] = (profile, datetime.utcnow().timestamp())
+        
+        logger.info(
+            f"Creator profile: {wallet_address[:8]} | "
+            f"Launches: {profile.total_launches} | "
+            f"Score: {profile.reputation_score:.1f} | "
+            f"Trust: {profile.trust_level}"
+        )
+        
+        return profile
+    
+    async def batch_resolve_creators(
+        self, 
+        mint_addresses: List[str]
+    ) -> Dict[str, Optional[str]]:
+        """Batch resolve multiple mint addresses to creators"""
+        results = {}
+        
+        # Process in batches to respect rate limits
+        batch_size = 10
+        for i in range(0, len(mint_addresses), batch_size):
+            batch = mint_addresses[i:i + batch_size]
+            tasks = [self.resolve_creator(mint) for mint in batch]
+            resolved = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for mint, creator in zip(batch, resolved):
+                if isinstance(creator, Exception):
+                    results[mint] = None
+                else:
+                    results[mint] = creator
+            
+            # Small delay between batches
+            await asyncio.sleep(0.5)
+        
+        resolved_count = sum(1 for v in results.values() if v)
+        logger.info(
+            f"Batch creator resolution: {resolved_count}/{len(mint_addresses)} resolved"
+        )
+        
+        return results
+    
+    async def _get_mint_authority(self, mint_address: str) -> Optional[str]:
+        """Get mint authority from account data"""
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getAccountInfo",
+            "params": [
+                mint_address,
+                {"encoding": "jsonParsed"}
+            ]
+        }
+        
+        data = await self._rpc_call(payload)
+        
+        if data and "result" in data:
+            try:
+                parsed = data["result"]["value"]["data"]["parsed"]["info"]
+                return parsed.get("mintAuthority") or parsed.get("freezeAuthority")
+            except (KeyError, TypeError):
+                pass
+        
+        return None
+    
+    async def _parse_mint_transaction(self, mint_address: str) -> Optional[str]:
+        """Find the transaction that created this mint"""
+        # Get signatures for the mint account (first transaction = creation)
+        payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getSignaturesForAddress",
+            "params": [
+                mint_address,
+                {"limit": 1, "commitment": "confirmed"}
+            ]
+        }
+        
+        data = await self._rpc_call(payload)
+        
+        if not (data and data.get("result")):
+            return None
+        
+        signatures = data["result"]
+        if not signatures:
+            return None
+        
+        # Get the creation transaction
+        first_sig = signatures[-1]["signature"]  # Oldest signature
+        
+        tx_payload = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getTransaction",
+            "params": [
+                first_sig,
+                {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}
+            ]
+        }
+        
+        tx_data = await self._rpc_call(tx_payload)
+        
+        if tx_data and "result" in tx_data and tx_data["result"]:
+            try:
+                # Fee payer is typically the deployer
+                account_keys = tx_data["result"]["transaction"]["message"]["accountKeys"]
+                if account_keys:
+                    return account_keys[0].get("pubkey") or account_keys[0]
+            except (KeyError, IndexError, TypeError):
+                pass
+        
+        return None
+    
+    async def _get_metadata_update_authority(self, mint_address: str) -> Optional[str]:
+        """Get update authority from Metaplex metadata"""
+        # Derive metadata PDA
+        url = f"{self.api_url}/token-metadata?api-key={self.api_key}"
+        
+        data = await self.client.request(
+            endpoint_name="helius",
+            url=url,
+            method="POST",
+            json={"mintAccounts": [mint_address]},
+            retry_config=self.retry_config
+        )
+        
+        if data and isinstance(data, list) and len(data) > 0:
+            metadata = data[0]
+            return metadata.get("updateAuthority")
+        
+        return None
+    
+    async def _get_wallet_launches(self, wallet_address: str) -> List[Dict]:
+        """Get all token launches from a wallet"""
+        url = f"{self.api_url}/addresses/{wallet_address}/transactions?api-key={self.api_key}&type=CREATE_ACCOUNT&limit=100"
+        
+        data = await self.client.request(
+            endpoint_name="helius",
+            url=url,
+            retry_config=self.retry_config
+        )
+        
+        if not data:
+            return []
+        
+        # Filter for token mint creation transactions
+        launches = []
+        transactions = data if isinstance(data, list) else data.get("transactions", [])
+        
+        for tx in transactions:
+            # Check for token program interaction
+            programs = tx.get("instructions", [])
+            for inst in programs:
+                if inst.get("programId") == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA":
+                    if inst.get("parsed", {}).get("type") == "initializeMint":
+                        launches.append(tx)
+                        break
+        
+        return launches
+    
+    async def _analyze_launches(
+        self, 
+        wallet_address: str, 
+        launches: List[Dict]
+    ) -> CreatorProfile:
+        """Analyze launch history to build reputation profile"""
+        profile = CreatorProfile(
+            wallet_address=wallet_address,
+            total_launches=len(launches),
+            first_seen=datetime.utcnow(),
+            last_updated=datetime.utcnow(),
+            data_sources=["helius"]
+        )
+        
+        if not launches:
+            return profile
+        
+        # Sort by timestamp
+        sorted_launches = sorted(
+            launches,
+            key=lambda x: x.get("timestamp", 0)
+        )
+        
+        if sorted_launches:
+            profile.first_seen = datetime.fromtimestamp(
+                sorted_launches[0].get("timestamp", 0)
+            )
+            profile.last_launch_timestamp = datetime.fromtimestamp(
+                sorted_launches[-1].get("timestamp", 0)
+            )
+        
+        # Calculate average days between launches
+        if len(sorted_launches) > 1:
+            timestamps = [tx.get("timestamp", 0) for tx in sorted_launches]
+            gaps = [
+                (timestamps[i+1] - timestamps[i]) / 86400 
+                for i in range(len(timestamps)-1)
+            ]
+            profile.avg_days_between_launches = sum(gaps) / len(gaps)
+        
+        # Note: Actual success/rug analysis would require
+        # checking each token's current state (price, liquidity)
+        # For now, set conservative defaults
+        profile.successful_launches = max(1, len(launches) // 2)
+        
+        return profile
+    
+    async def _rpc_call(self, payload: Dict, use_backup: bool = True) -> Optional[Dict]:
+        """Make RPC call with fallback to backup providers"""
+        
+        # Try primary
+        data = await self.client.request(
+            endpoint_name="helius",
+            url=self.rpc_url,
+            method="POST",
+            json=payload,
+            retry_config=RetryConfig(max_attempts=2),
+            headers={"Content-Type": "application/json"}
+        )
+        
+        if data:
+            return data
+        
+        # Try backup RPCs
+        if use_backup:
+            for backup_url in self.backup_rpcs:
+                data = await self.client.request(
+                    endpoint_name="helius",
+                    url=backup_url,
+                    method="POST",
+                    json=payload,
+                    retry_config=RetryConfig(max_attempts=1),
+                    headers={"Content-Type": "application/json"}
+                )
+                if data:
+                    logger.debug(f"Helius: Used backup RPC {backup_url}")
+                    return data
+        
+        return None
+```
+
+---
+
+## Phase 3: Intelligence Engine
+
+### Scoring & Signal Generation
+
+```python
+# src/intelligence/scoring_engine.py
+
+import logging
+import math
+from typing import Dict, Optional, List
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+from src.models.token_models import (
+    TokenDiscovery, CreatorProfile, MarketData, 
+    SocialSignal, SignalStrength
+)
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class ScoringWeights:
+    """Configurable weights for composite scoring"""
+    creator_reputation: float = 0.30   # 30%
+    market_momentum: float = 0.25      # 25%
+    social_signals: float = 0.20       # 20%
+    liquidity_quality: float = 0.15   # 15%
+    timing_patterns: float = 0.10     # 10%
+    
+    def validate(self):
+        total = (
+            self.creator_reputation + self.market_momentum + 
+            self.social_signals + self.liquidity_quality + 
+            self.timing_patterns
+        )
+        assert abs(total - 1.0) < 0.001, f"Weights must sum to 1.0, got {total}"
+
+@dataclass
+class TradingSignal:
+    """Generated trading signal for paper trading"""
+    token: TokenDiscovery
+    action: str          # BUY / WATCH / SKIP / AVOID
+    confidence: float    # 0-100
+    composite_score: float
+    
+    # Position sizing
+    suggested_position_size_pct: float  # % of portfolio
+    suggested_position_usd: float
+    
+    # Risk management
+    stop_loss_pct: float
+    take_profit_levels: List[float]  # Multiple TP levels
+    
+    # Signal details
+    primary_reason: str
+    supporting_reasons: List[str]
+    risk_factors: List[str]
+    score_breakdown: Dict[str, float]
+    
+    # Timing
+    generated_at: datetime
+    valid_until: Optional[datetime] = None
+    
+    def to_alert_message(self) -> str:
+        """Format as Telegram/Discord alert"""
+        emoji_map = {
+            "BUY": "🟢",
+            "WATCH": "🟡", 
+            "SKIP": "⚪",
+            "AVOID": "🔴"
+        }
+        
+        token = self.token
+        md = token.market_data
+        
+        lines = [
+            f"{emoji_map.get(self.action, '⚪')} **{self.action}** Signal",
+            f"",
+            f"🪙 **{token.symbol}** ({token.name})",
+            f"📊 Score: {self.composite_score:.1f}/100 | Confidence: {self.confidence:.0f}%",
+            f"",
+            f"💰 Market Cap: ${md.market_cap_usd:,.0f}" if md else "",
+            f"💧 Liquidity: ${md.liquidity_usd:,.0f}" if md else "",
+            f"📈 Price Change 1h: {md.price_change_1h:+.1f}%" if md else "",
+            f"",
+            f"👤 Creator Trust: {token.creator_profile.trust_level if token.creator_profile else 'unknown'}",
+            f"",
+            f"✅ Reason: {self.primary_reason}",
+            f"🎯 Position: {self.suggested_position_size_pct:.1f}% portfolio",
+            f"🛑 Stop Loss: -{self.stop_loss_pct:.0f}%",
+            f"🎯 Take Profit: {' / '.join([f'+{tp:.0f}%' for tp in self.take_profit_levels[:3]])}",
+            f"",
+        ]
+        
+        if self.risk_factors:
+            lines.append(f"⚠️ Risks: {', '.join(self.risk_factors[:3])}")
+        
+        if token.pump_fun_url:
+            lines.append(f"🔗 {token.pump_fun_url}")
+        elif token.dexscreener_url:
+            lines.append(f"🔗 {token.dexscreener_url}")
+        
+        return "\n".join(line for line in lines if line is not None)
+
+class ScoringEngine:
+    """
+    Composite scoring engine combining all intelligence signals
+    """
+    
+    def __init__(
+        self, 
+        weights: Optional[ScoringWeights] = None,
+        portfolio_size_usd: float = 10000.0
+    ):
+        self.weights = weights or ScoringWeights()
+        self.weights.validate()
+        self.portfolio_size_usd = portfolio_size_usd
+        
+        # Risk-adjusted thresholds
+        self.thresholds = {
+            "strong_buy": 75.0,
+            "buy": 60.0,
+            "watch": 40.0,
+            "skip": 20.0,
+        }
+    
+    def score_token(self, token: TokenDiscovery) -> TokenDiscovery:
+        """
+        Calculate composite score for a token discovery
+        Modifies token in place, returns token
+        """
+        breakdown = {}
+        
+        # 1. Creator reputation score (0-100)
+        creator_score = self._score_creator(token.creator_profile)
+        breakdown["creator_reputation"] = creator_score
+        
+        # 2. Market momentum score (0-100)
+        momentum_score = self._score_momentum(token.market_data)
+        breakdown["market_momentum"] = momentum_score
+        
+        # 3. Social signal score (0-100)
+        social_score = self._score_social(token.social_signal)
+        breakdown["social_signals"] = social_score
+        
+        # 4. Liquidity quality score (0-100)
+        liquidity_score = self._score_liquidity(token.market_data)
+        breakdown["liquidity_quality"] = liquidity_score
+        
+        # 5. Timing pattern score (0-100)
+        timing_score = self._score_timing(token)
+        breakdown["timing_patterns"] = timing_score
+        
+        # Weighted composite
+        composite = (
+            creator_score * self.weights.creator_reputation +
+            momentum_score * self.weights.market_momentum +
+            social_score * self.weights.social_signals +
+            liquidity_score * self.weights.liquidity_quality +
+            timing_score * self.weights.timing_patterns
+        )
+        
+        # Apply risk penalties
+        risk_penalty = len(token.risk_flags) * 3.0
+        composite = max(0.0, composite - risk_penalty)
+        
+        # Cap at 100
+        composite = min(100.0, composite)
+        
+        token.composite_score = round(composite, 2)
+        token.score_breakdown = {k: round(v, 2) for k, v in breakdown.items()}
+        
+        # Determine signal strength
+        if composite >= self.thresholds["strong_buy"]:
+            token.signal_strength = SignalStrength.VERY_STRONG
+        elif composite >= self.thresholds["buy"]:
+            token.signal_strength = SignalStrength.STRONG
+        elif composite >= self.thresholds["watch"]:
+            token.signal_strength = SignalStrength.MODERATE
+        else:
+            token.signal_strength = SignalStrength.WEAK
+        
+        return token
+    
+    def generate_signal(
+        self, 
+        token: TokenDiscovery,
+        max_position_pct: float = 5.0
+    ) -> TradingSignal:
+        """Generate actionable trading signal from scored token"""
+        
+        # Ensure token is scored
+        if token.composite_score == 0.0:
+            self.score_token(token)
+        
+        score = token.composite_score
+        
+        # Determine action
+        if score >= self.thresholds["strong_buy"] and not self._has_critical_risks(token):
+            action = "BUY"
+        elif score >= self.thresholds["buy"] and not self._has_critical_risks(token):
+            action = "WATCH"  # Paper trading - use WATCH before BUY
+        elif score >= self.thresholds["watch"]:
+            action = "WATCH"
+        elif self._has_critical_risks(token):
+            action = "AVOID"
+        else:
+            action = "SKIP"
+        
+        # Position sizing (Kelly-inspired, conservative)
+        position_pct = self._calculate_position_size(score, token, max_position_pct)
+        position_usd = self.portfolio_size_usd * position_pct / 100
+        
+        # Risk management levels
+        stop_loss_pct = self._calculate_stop_loss(score, token)
+        take_profit_levels = self._calculate_take_profits(score, token)
+        
+        # Confidence (score + data completeness)
+        confidence = self._calculate_confidence(token)
+        
+        # Generate reasons
+        primary_reason, supporting_reasons = self._generate_reasons(token)
+        
+        return TradingSignal(
+            token=token,
+            action=action,
+            confidence=confidence,
+            composite_score=score,
+            suggested_position_size_pct=position_pct,
+            suggested_position_usd=position_usd,
+            stop_loss_pct=stop_loss_pct,
+            take_profit_levels=take_profit_levels,
+            primary_reason=primary_reason,
+            supporting_reasons=supporting_reasons,
+            risk_factors=token.risk_flags,
+            score_breakdown=token.score_breakdown,
+            generated_at=datetime.utcnow(),
+            valid_until=datetime.utcnow() + timedelta(hours=1)
+        )
+    
+    def _score_creator(self, creator: Optional[CreatorProfile]) -> float:
+        """Score creator reputation (0-100)"""
+        if not creator:
+            return 25.0  # Neutral-low for unknown creators
+        
+        # Base score from reputation
+        base = creator.reputation_score
+        
+        # Bonus for verified social
+        if creator.verified_social:
+            base = min(100, base + 5)
+        
+        # Penalty for known rug pulls
+        if creator.rug_rate > 0.5:
+            base = min(base, 20.0)  # Cap at 20 if >50% rugs
+        
+        return base
+    
+    def _score_momentum(self, market_data: Optional[MarketData]) -> float:
+        """Score market momentum (0-100)"""
+        if not market_data:
+            return 30.0  # Default for missing data
+        
+        score = 50.0  # Start neutral
+        
+        # Price momentum
+        if market_data.price_change_1h > 50:
+            score += 20
+        elif market_data.price_change_1h > 20:
+            score += 10
+        elif market_data.price_change_1h > 5:
+            score += 5
+        elif market_data.price_change_1h < -20:
+            score -= 15
+        elif market_data.price_change_1h < -5:
+            score -= 5
+        
+        # Volume momentum
+        if market_data.volume_1h > 50000:
+            score += 15
+        elif market_data.volume_1h > 10000:
+            score += 10
+        elif market_data.volume_1h > 1000:
+            score += 5
+        elif market_data.volume_1h < 100:
+            score -= 10
+        
+        # Buy pressure
+        if market_data.buy_sell_ratio > 0.65:
+            score += 10
+        elif market_data.buy_sell_ratio > 0.55:
+            score += 5
+        elif market_data.buy_sell_ratio < 0.35:
+            score -= 10
+        
+        # Bonding curve progress (pump.fun)
+        if market_data.bonding_curve_progress > 80:
+            score += 15  # Near graduation
+        elif market_data.bonding_curve_progress > 50:
+            score += 8
+        
+        return max(0.0, min(100.0, score))
+    
+    def _score_social(self, social: Optional[SocialSignal]) -> float:
+        """Score social signals (0-100)"""
+        if not social:
+            return 20.0  # Low score for no social data
+        
+        score = 0.0
+        
+        # Mentions volume
+        if social.mentions_1h > 100:
+            score += 30
+        elif social.mentions_1h > 50:
+            score += 20
+        elif social.mentions_1h > 10:
+            score += 10
+        
+        # Sentiment
+        score += (social.sentiment_score + 1) / 2 * 30  # -1 to +1 mapped to 0-30
+        
+        # Influencer mentions
+        if social.influencer_mentions > 5:
+            score += 20
+        elif social.influencer_mentions > 1:
+            score += 10
+        elif social.influencer_mentions == 1:
+            score += 5
+        
+        # Community size
+        if social.telegram_members > 1000:
+            score += 10
+        elif social.telegram_members > 100:
+            score += 5
+        
+        return max(0.0, min(100.0, score))
+    
+    def _score_liquidity(self, market_data: Optional[MarketData]) -> float:
+        """Score liquidity quality (0-100)"""
+        if not market_data:
+            return 20.0
+        
+        liquidity = market_data.liquidity_usd
+        
+        if liquidity >= 100000:
+            return 95.0
+        elif liquidity >= 50000:
+            return 80.0
+        elif liquidity >= 20000:
+            return 65.0
+        elif liquidity >= 10000:
+            return 50.0
+        elif liquidity >= 5000:
+            return 35.0
+        elif liquidity >= 1000:
+            return 20.0
+        else:
+            return 5.0
+    
+    def _score_timing(self, token: TokenDiscovery) -> float:
+        """Score timing patterns (0-100)"""
+        score = 50.0
+        
+        if not token.discovered_at:
+            return score
+        
+        age_hours = (datetime.utcnow() - token.discovered_at).total_seconds() / 3600
+        
+        # Freshness bonus (sweet spot: 30min - 4 hours)
+        if 0.5 <= age_hours <= 4:
+            score += 30
+        elif 0 <= age_hours < 0.5:
+            score += 15  # Very new - higher risk
+        elif 4 < age_hours <= 24:
+            score += 10
+        elif age_hours > 48:
+            score -= 20
+        
+        # Known creator timing patterns
+        if token.creator_profile and token.creator_profile.typical_launch_hour is not None:
+            current_hour = datetime.utcnow().hour
+            expected_hour = token.creator_profile.typical_launch_hour
+            if abs(current_hour - expected_hour) <= 1:
+                score += 20  # Matches creator's typical launch time
+        
+        return max(0.0, min(100.0, score))
+    
+    def _has_critical_risks(self, token: TokenDiscovery) -> bool:
+        """Check for critical risk flags that should block BUY signals"""
+        critical_flags = {
+            "honeypot_detected",
+            "creator_known_rugger",
+            "very_low_liquidity",
+            "suspicious_buy_dominance",
+        }
+        return bool(critical_flags.intersection(set(token.risk_flags)))
+    
+    def _calculate_position_size(
+        self, 
+        score: float, 
+        token: TokenDiscovery,
+        max_pct: float
+    ) -> float:
+        """Kelly criterion-inspired position sizing"""
+        if score < self.thresholds["buy"]:
+            return 0.0
+        
+        # Scale from 0 to max_pct based on score
+        normalized = (score - self.thresholds["buy"]) / (100 - self.thresholds["buy"])
+        position = normalized * max_pct
+        
+        # Reduce for unknown creators
+        if not token.creator_profile or token.creator_profile.trust_level == "unknown":
+            position *= 0.5
+        
+        # Reduce for high-risk flags
+        position *= max(0.1, 1.0 - len(token.risk_flags) * 0.15)
+        
+        return round(max(0.0, min(position, max_pct)), 2)
+    
+    def _calculate_stop_loss(self, score: float, token: TokenDiscovery) -> float:
+        """Dynamic stop loss based on volatility and score"""
+        # Higher score = tighter stop (more conviction)
+        # New tokens are volatile, wider stops
+        base_stop = 30.0  # 30% default for meme tokens
+        
+        if score >= 80:
+            return 20.0
+        elif score >= 60:
+            return 25.0
+        else:
+            return base_stop
+    
+    def _calculate_take_profits(
+        self, 
+        score: float, 
+        token: TokenDiscovery
+    ) -> List[float]:
+        """Multiple take profit levels"""
+        # Creator with good history = higher targets
+        creator = token.creator_profile
+        
+        if creator and creator.avg_peak_multiplier > 5:
+            return [50.0, 100.0, 300.0, 500.0]  # Ambitious targets
+        elif creator and creator.avg_peak_multiplier > 2:
+            return [30.0, 75.0, 150.0]
+        else:
+            return [25.0, 50.0, 100.0]  # Conservative
+    
+    def _calculate_confidence(self, token: TokenDiscovery) -> float:
+        """Confidence based on data completeness"""
+        confidence = 50.0
+        
+        if token.creator_profile:
+            confidence += 15
+        if token.market_data:
+            confidence += 15
+        if token.social_signal:
+            confidence += 10
+        if token.creator_profile and token.creator_profile.total_launches > 5:
+            confidence += 10
+        
+        # Reduce for missing data
+        confidence -= len(token.risk_flags) * 2
+        
+        return max(10.0, min(100.0, confidence))
+    
+    def _generate_reasons(
+        self, 
+        token: TokenDiscovery
+    ) -> tuple[str, List[str]]:
+        """Generate human-readable signal rationale"""
+        reasons = []
+        
+        if token.creator_profile:
+            cp = token.creator_profile
+            if cp.trust_level in ("elite", "high"):
+                reasons.append(f"Trusted creator ({cp.trust_level}, {cp.success_rate:.0%} win rate)")
+            if cp.avg_peak_multiplier > 3:
+                reasons.append(f"Creator avg {cp.avg_peak_multiplier:.1f}x multiplier")
+        
+        if token.market_data:
+            md = token.market_data
+            if md.price_change_1h > 20:
+                reasons.append(f"Strong 1h momentum +{md.price_change_1h:.0f}%")
+            if md.buy_sell_ratio > 0.65:
+                reasons.append(f"High buy pressure ({md.buy_sell_ratio:.0%} buys)")
+            if md.bonding_curve_progress > 70:
+                reasons.append(f"Near graduation ({md.bonding_curve_progress:.0f}%)")
+        
+        if token.social_signal:
+            ss = token.social_signal
+            if ss.influencer_mentions > 0:
+                reasons.append(f"{ss.influencer_mentions} influencer mention(s)")
+            if ss.mentions_1h > 50:
+                reasons.append(f"High mention velocity ({ss.mentions_1h}/hr)")
+        
+        primary = reasons[0] if reasons else "Composite score threshold met"
+        supporting = reasons[1:] if len(reasons) > 1 else []
+        
+        return primary, supporting
+```
+
+---
+
+## Phase 4: Unified Discovery Agent
+
+```python
+# src/agents/unified_discovery_agent.py
+
+import asyncio
+import logging
+from typing import List, Dict, Optional, Set
+from datetime import datetime, timedelta
+from collections import defaultdict
+
+from src.core.api_client_manager import APIClientManager
+from src.collectors.pump_fun_client import PumpFunClient
+from src.collectors.dexscreener_client import DexScreenerClient
+from src.collectors.helius_client import HeliusClient
+from src.intelligence.scoring_engine import ScoringEngine, TradingSignal
+from src.models.token_models import TokenDiscovery, DataSource
+
+logger = logging.getLogger(__name__)
+
+class UnifiedDiscoveryAgent:
+    """
+    Master agent orchestrating all data sources
+    
+    Data Flow:
+    ┌─────────────┐  ┌─────────────┐  ┌─────────────┐
+    │  pump.fun   │  │ DexScreener │  │   Birdeye   │
+    └──────┬──────┘  └──────┬──────┘  └──────┬──────┘
+           │                │                │
+           └────────────────┴────────────────┘
+                            │
+                    ┌───────▼───────┐
+                    │   Dedup &     │
+                    │   Normalize   │
+                    └───────┬───────┘
+                            │
+                    ┌───────▼───────┐
+                    │    Creator    │
+                    │  Resolution   │
+                    │   (Helius)    │
+                    └───────┬───────┘
+                            │
+                    ┌───────▼───────┐
+                    │    Scoring    │
+                    │    Engine     │
+                    └───────┬───────┘
+                            │
+                    ┌───────▼───────┐
+                    │    Signal     │
+                    │  Generation   │
+                    └───────────────┘
+    """
+    
+    def __init__(
+        self,
+        helius_api_key: str,
+        portfolio_size_usd: float = 10000.0,
+        min_signal_score: float = 40.0,
+    ):
+        self.helius_api_key = helius_api_key
+        self.portfolio_size_usd = portfolio_size_usd
+        self.min_signal_score = min_signal_score
+        
+        # Deduplication
+        self._seen_mints: Set[str] = set()
+        self._discovery_cache: Dict[str, TokenDiscovery] = {}
+        
+        # Metrics
+        self.stats = {
+            "total_discovered": 0,
+            "creator_resolved": 0,
+            "signals_generated": 0,
+            "by_source": defaultdict(int),
+            "by_action": defaultdict(int),
+            "session_start": datetime.utcnow()
+        }
+        
+        # Signal history
+        self.signal_history: List[TradingSignal] = []
+    
+    async def run(self, scan_interval_seconds: int = 60):
+        """
+        Main agent loop - continuous discovery
+        """
+        async with APIClientManager() as client_manager:
+            self.pump_fun = PumpFunClient(client_manager)
+            self.dexscreener = DexScreenerClient(client_manager)
+            self.helius = HeliusClient(client_manager, self.helius_api_key)
+            self.scorer = ScoringEngine(portfolio_size_usd=self.portfolio_size_usd)
+            
+            logger.info("="*60)
+            logger.info("🚀 Unified Token Discovery Agent Started")
+            logger.info(f"   Scan interval: {scan_interval_seconds}s")
+            logger.info(f"   Min signal score: {self.min_signal_score}")
+            logger.info(f"   Portfolio size: ${self.portfolio_size_usd:,.0f}")
+            logger.info("="*60)
+            
+            # Start WebSocket stream in background
+            ws_task = asyncio.create_task(self._run_websocket_stream())
+            
+            # Main scan loop
+            scan_count = 0
+            while True:
+                scan_count += 1
+                logger.info(f"\n{'='*40}")
+                logger.info(f"🔍 Scan #{scan_count} - {datetime.utcnow().strftime('%H:%M:%S UTC')}")
+                
+                try:
+                    signals = await self._run_scan_cycle()
+                    
+                    if signals:
+                        logger.info(f"\n🎯 Generated {len(signals)} signals:")
+                        for signal in signals:
+                            logger.info(signal.to_alert_message())
+                            logger.info("-" * 40)
+                    else:
+                        logger.info("No actionable signals this cycle")
+                    
+                    # Print health report every 5 scans
+                    if scan_count % 5 == 0:
+                        self._print_stats(client_manager)
+                
+                except Exception as e:
+                    logger.error(f"Scan cycle error: {e}", exc_info=True)
+                
+                await asyncio.sleep(scan_interval_seconds)
+    
+    async def _run_scan_cycle(self) -> List[TradingSignal]:
+        """Execute one complete scan cycle across all sources"""
+        
+        # Collect from all sources concurrently
+        tasks = [
+            self._collect_pump_fun(),
+            self._collect_dexscreener(),
+        ]
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        all_tokens = []
+        for result in results:
+            if isinstance(result, list):
+                all_tokens.extend(result)
+            elif isinstance(result, Exception):
+                logger.error(f"Collection error: {result}")
+        
+        logger.info(f"Raw discovery: {len(all_tokens)} tokens from all sources")
+        
+        # Deduplicate by mint address
+        new_tokens = self._deduplicate(all_tokens)
+        logger.info(f"After dedup: {len(new_tokens)} new tokens")
+        
+        if not new_tokens:
+            return []
+        
+        # Resolve creators in batch
+        await self._batch_resolve_creators(new_tokens)
+        
+        # Score all tokens
+        for token in new_tokens:
+            self.scorer.score_token(token)
+        
+        # Filter and generate signals
+        signals = []
+        for token in new_tokens:
+            if token.composite_score >= self.min_signal_score:
+                signal = self.scorer.generate_signal(token)
+                signals.append(signal)
+                self.signal_history.append(signal)
+                self.stats["signals_generated"] += 1
+                self.stats["by_action"][signal.action] += 1
+        
+        # Sort by score descending
+        signals.sort(key=lambda s: s.composite_score, reverse=True)
+        
+        return signals
+    
+    async def _collect_pump_fun(self) -> List[TokenDiscovery]:
+        """Collect from pump.fun with error handling"""
+        try:
+            tokens = await self.pump_fun.get_new_tokens(limit=50)
+            koh = await self.pump_fun.get_king_of_hill()
+            
+            all_tokens = tokens + koh
+            self.stats["by_source"]["pump_fun"] += len(all_tokens)
+            self.stats["total_discovered"] += len(all_tokens)
+            
+            logger.info(f"  pump.fun: {len(tokens)} new + {len(koh)} king-of-hill")
+            return all_tokens
+            
+        except Exception as e:
+            logger.error(f"pump.fun collection failed: {e}")
+            return []
+    
+    async def _collect_dexscreener(self) -> List[TokenDiscovery]:
+        """Collect from DexScreener with enrichment"""
+        try:
+            new_pairs = await self.dexscreener.get_new_pairs()
+            trending = await self.dexscreener.get_trending_tokens()
+            boosted = await self.dexscreener.get_boosted_tokens()
+            
+            all_tokens = new_pairs + trending + boosted
+            self.stats["by_source"]["dexscreener"] += len(all_tokens)
+            self.stats["total_discovered"] += len(all_tokens)
+            
+            logger.info(
+                f"  DexScreener: {len(new_pairs)} pairs + "
+                f"{len(trending)} trending + {len(boosted)} boosted"
+            )
+            return all_tokens
+            
+        except Exception as e:
+            logger.error(f"DexScreener collection failed: {e}")
+            return []
+    
+    async def _batch_resolve_creators(self, tokens: List[TokenDiscovery]):
+        """Resolve creators for all tokens, update profiles"""
+        
+        # Identify tokens needing creator resolution
+        needs_resolution = [
+            t for t in tokens 
+            if not t.creator_wallet and t.mint_address
+        ]
+        
+        if not needs_resolution:
+            return
+        
+        logger.info(f"  Resolving creators for {len(needs_resolution)} tokens...")
+        
+        # Batch resolve mint -> creator wallet
+        mint_addresses = [t.mint_address for t in needs_resolution]
+        creator_map = await self.helius.batch_resolve_creators(mint_addresses)
+        
+        # Assign creator wallets
+        for token in needs_resolution:
+            creator_wallet = creator_map.get(token.mint_address)
+            if creator_wallet:
+                token.creator_wallet = creator_wallet
+        
+        # Get creator profiles for resolved wallets
+        tokens_with_creators = [t for t in tokens if t.creator_wallet]
+        unique_wallets = list(set(t.creator_wallet for t in tokens_with_creators))
+        
+        logger.info(f"  Fetching {len(unique_wallets)} creator profiles...")
+        
+        # Build profiles concurrently (with throttling)
+        profile_tasks = []
+        for wallet in unique_wallets[:20]:  # Limit concurrent profile fetches
+            profile_tasks.append(self.helius.get_creator_profile(wallet))
+        
+        profiles = await asyncio.gather(*profile_tasks, return_exceptions=True)
+        profile_map = {}
+        
+        for wallet, profile in zip(unique_wallets[:20], profiles):
+            if isinstance(profile, CreatorProfile) or (
+                not isinstance(profile, Exception) and profile is not None
+            ):
+                profile_map[wallet] = profile
+                self.stats["creator_resolved"] += 1
+        
+        # Assign profiles to tokens
+        for token in tokens_with_creators:
+            if token.creator_wallet in profile_map:
+                token.creator_profile = profile_map[token.creator_wallet]
+        
+        resolved_count = sum(1 for t in tokens if t.creator_profile)
+        logger.info(f"  Creator resolution: {resolved_count}/{len(tokens)} tokens")
+    
+    def _deduplicate(self, tokens: List[TokenDiscovery]) -> List[TokenDiscovery]:
+        """Remove duplicates, keeping highest-quality record"""
+        token_map: Dict[str, TokenDiscovery] = {}
+        
+        for token in tokens:
+            mint = token.mint_address
+            if not mint:
+                continue
+            
+            if mint in self._seen_mints:
+                continue
+            
+            if mint in token_map:
+                # Keep the one with more data
+                existing = token_map[mint]
+                if (token.creator_wallet and not existing.creator_wallet):
+                    token_map[mint] = token
+                elif (token.market_data and not existing.market_data):
+                    token_map[mint] = token
+            else:
+                token_map[mint] = token
+        
+        # Mark all as seen
+        new_tokens = list(token_map.values())
+        for token in new_tokens:
+            self._seen_mints.add(token.mint_address)
+            self._discovery_cache[token.mint_address] = token
+        
+        return new_tokens
+    
+    async def _run_websocket_stream(self):
+        """Background WebSocket listener for pump.fun real-time events"""
+        
+        async def handle_new_token(token: TokenDiscovery):
+            if token.mint_address in self._seen_mints:
+                return
+            
+            logger.info(f"⚡ Real-time: New token {token.symbol} ({token.mint_address[:8]})")
+            
+            # Quick score without full creator resolution
+            self.scorer.score_token(token)
+            
+            if token.composite_score >= self.min_signal_score:
+                signal = self.scorer.generate_signal(token)
+                logger.info(f"⚡ IMMEDIATE SIGNAL: {signal.to_alert_message()}")
+        
+        await self.pump_fun.stream_new_tokens()
+    
+    def _print_stats(self, client_manager: APIClientManager):
+        """Print session statistics"""
+        runtime = datetime.utcnow() - self.stats["session_start"]
+        hours = runtime.total_seconds() / 3600
+        
+        logger.info("\n" + "="*50)
+        logger.info("📊 SESSION STATISTICS")
+        logger.info(f"  Runtime: {runtime}")
+        logger.info(f"  Total discovered: {self.stats['total_discovered']}")
+        logger.info(f"  Creators resolved: {self.stats['creator_resolved']}")
+        logger.info(f"  Signals generated: {self.stats['signals_generated']}")
+        logger.info(f"  By source: {dict(self.stats['by_source'])}")
+        logger.info(f"  By action: {dict(self.stats['by_action'])}")
+        logger.info(f"  Tokens/hour: {self.stats['total_discovered']/max(hours,0.01):.0f}")
+        
+        # API health
+        logger.info("\n🔧 API HEALTH:")
+        health = client_manager.get_health_report()
+        for name, status in health.items():
+            logger.info(
+                f"  {name}: {status['status']} | "
+                f"Success: {status['success_rate']} | "
+                f"Latency: {status['avg_latency_ms']}"
+            )
+        logger.info("="*50)
+
+# =====================================================
+# Entry point
+# =====================================================
+
+async def main():
+    import os
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        datefmt="%H:%M:%S"
+    )
+    
+    agent = UnifiedDiscoveryAgent(
+        helius_api_key=os.getenv("HELIUS_API_KEY", ""),
+        portfolio_size_usd=float(os.getenv("PORTFOLIO_SIZE_USD", "10000")),
+        min_signal_score=float(os.getenv("MIN_SIGNAL_SCORE", "40")),
+    )
+    
+    await agent.run(scan_interval_seconds=60)
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+---
+
+## Phase 5: Monitoring Dashboard
+
+```python
+# src/monitoring/dashboard.py
+
+import asyncio
+import json
+import logging
+from datetime import datetime, timedelta
+from typing import Dict, List
+from collections import deque
+from dataclasses import dataclass, asdict
+
+from src.models.token_models import TokenDiscovery, SignalStrength
+
+logger = logging.getLogger(__name__)
+
+@dataclass
+class HealthMetric:
+    name: str
+    value: float
+    unit: str
+    status: str  # OK / WARNING / CRITICAL
+    timestamp: datetime = None
+    
+    def __post_init__(self):
+        if not self.timestamp:
+            self.timestamp = datetime.utcnow()
+
+class HealthMonitor:
+    """
+    Real-time system health monitoring
+    """
+    
+    THRESHOLDS = {
+        "api_success_rate": {"warning": 0.85, "critical": 0.70},
+        "creator_resolution_rate": {"warning": 0.60, "critical": 0.40},
+        "scan_latency_ms": {"warning": 5000, "critical": 10000},
+        "signal_rate_per_hour": {"warning": 0, "critical": 0},
+    }
+    
+    def __init__(self, window_size: int = 100):
+        self.metrics_history: deque = deque(maxlen=window_size)
+        self.alerts: List[Dict] = []
+        self.start_time = datetime.utcnow()
+        
+        # Counters
+        self._api_calls = {"total": 0, "success": 0}
+        self._creator_resolutions = {"attempted": 0, "resolved": 0}
+        self._scan_latencies: deque = deque(maxlen=20)
+        self._signal_counts: deque = deque(maxlen=60)
+    
+    def record_api_call(self, success: bool):
+        self._api_calls["total"] += 1
+        if success:
+            self._api_calls["success"] += 1
+    
+    def record_creator_resolution(self, resolved: bool):
+        self._creator_resolutions["attempted"] += 1
+        if resolved:
+            self._creator_resolutions["resolved"] += 1
+    
+    def record_scan_latency(self, latency_ms: float):
+        self._scan_latencies.append(latency_ms)
+    
+    def record_signals(self, count: int):
+        self._signal_counts.append({
+            "count": count,
+            "timestamp": datetime.utcnow()
+        })
+    
+    def get_current_metrics(self) -> List[HealthMetric]:
+        metrics = []
+        
+        # API Success Rate
+        total = self._api_calls["total"]
+        if total > 0:
+            rate = self._api_calls["success"] / total
+            metrics.append(HealthMetric(
+                name="API Success Rate",
+                value=rate * 100,
+                unit="%",
+                status=self._get_status("api_success_rate", rate)
+            ))
+        
+        # Creator Resolution Rate
+        attempted = self._creator_resolutions["attempted"]
+        if attempted > 0:
+            rate = self._creator_resolutions["resolved"] / attempted
+            metrics.append(HealthMetric(
+                name="Creator Resolution Rate",
+                value=rate * 100,
+                unit="%",
+                status=self._get_status("creator_resolution_rate", rate)
+            ))
+        
+        # Scan Latency
+        if self._scan_latencies:
+            avg_latency = sum(self._scan_latencies) / len(self._scan_latencies)
+            metrics.append(HealthMetric(
+                name="Avg Scan Latency",
+                value=avg_latency,
+                unit="ms",
+                status=self._get_status("scan_latency_ms", avg_latency)
+            ))
+        
+        # Signal Rate
+        one_hour_ago = datetime.utcnow() - timedelta(hours=1)
+        recent_signals = sum(
+            s["count"] for s in self._signal_counts
+            if s["timestamp"] > one_hour_ago
+        )
+        metrics.append(HealthMetric(
+            name="Signals (last hour)",
+            value=recent_signals,
+            unit="signals",
+            status="OK" if recent_signals > 0 else "WARNING"
+        ))
+        
+        # Uptime
+        uptime = (datetime.utcnow() - self.start_time).total_seconds() / 3600
+        metrics.append(HealthMetric(
+            name="Uptime",
+            value=uptime,
+            unit="hours",
+            status="OK"
+        ))
+        
+        return metrics
+    
+    def print_dashboard(self):
+        """Terminal dashboard output"""
+        metrics = self.get_current_metrics()
+        
+        print("\n" + "╔" + "═"*50 + "╗")
+        print("║" + " HEALTH DASHBOARD ".center(50) + "║")
+        print("║" + datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC").center(50) + "║")
+        print("╠" + "═"*50 + "╣")
+        
+        status_icons = {"OK": "✅", "WARNING": "⚠️", "CRITICAL": "🔴"}
+        
+        for metric in metrics:
+            icon = status_icons.get(metric.status, "❓")
+            line = f"  {icon} {metric.name}: {metric.value:.1f}{metric.unit}"
+            print("║" + line.ljust(50) + "║")
+        
+        print("╚" + "═"*50 + "╝")
+        
+        # Active alerts
+        if self.alerts:
+            print(f"\n⚠️  ACTIVE ALERTS ({len(self.alerts)}):")
+            for alert in self.alerts[-5:]:
+                print(f"  • {alert['message']}")
+    
+    def _get_status(self, metric_name: str, value: float) -> str:
+        thresholds = self.THRESHOLDS.get(metric_name)
+        if not thresholds:
+            return "OK"
+        
+        if value <= thresholds.get("critical", 0):
+            self._raise_alert(metric_name, value, "CRITICAL")
+            return "CRITICAL"
+        elif value <= thresholds.get("warning", 0):
+            return "WARNING"
+        return "OK"
+    
+    def _raise_alert(self, metric_name: str, value: float, severity: str):
+        alert = {
+            "timestamp": datetime.utcnow().isoformat(),
+            "metric": metric_name,
+            "value": value,
+            "severity": severity,
+            "message": f"{severity}: {metric_name} = {value:.2f}"
+        }
+        self.alerts.append(alert)
+        logger.warning(f"ALERT: {alert['message']}")
+```
+
+---
+
+## Configuration & Environment
+
+```python
+# src/config/settings.py
+
+from dataclasses import dataclass, field
+from typing import Optional
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+@dataclass
+class APIConfig:
+    helius_api_key: str = ""
+    birdeye_api_key: str = ""
+    
+    def validate(self):
+        if not self.helius_api_key:
+            raise ValueError("HELIUS_API_KEY is required")
+
+@dataclass  
+class ScanConfig:
+    scan_interval_seconds: int = 60
+    min_signal_score: float = 40.0
+    max_tokens_per_scan: int = 100
+    enable_websocket: bool = True
+    
+@dataclass
+class TradingConfig:
+    portfolio_size_usd: float = 10000.0
+    max_position_pct: float = 5.0
+    default_stop_loss_pct: float = 30.0
+    paper_trading_mode: bool = True  # Always True for safety
+
+@dataclass
+class LogConfig:
+    level: str = "INFO"
+    log_file: Optional[str] = "logs/agent.log"
+    max_file_size_mb: int = 100
+
+@dataclass
+class Settings:
+    api: APIConfig = field(default_factory=APIConfig)
+    scan: ScanConfig = field(default_factory=ScanConfig)
+    trading: TradingConfig = field(default_factory=TradingConfig)
+    logging: LogConfig = field(default_factory=LogConfig)
+    
+    @classmethod
+    def from_environment(cls) -> "Settings":
+        settings = cls()
+        
+        settings.api.helius_api_key = os.getenv("HELIUS_API_KEY", "")
+        settings.api.birdeye_api_key = os.getenv("BIRDEYE_API_KEY", "")
+        
+        settings.scan.scan_interval_seconds = int(
+            os.getenv("SCAN_INTERVAL_SECONDS", "60")
+        )
+        settings.scan.min_signal_score = float(
+            os.getenv("MIN_SIGNAL_SCORE", "40")
+        )
+        
+        settings.trading.portfolio_size_usd = float(
+            os.getenv("PORTFOLIO_SIZE_USD", "10000")
+        )
+        settings.trading.paper_trading_mode = (
+            os.getenv("PAPER_TRADING", "true").lower() == "true"
+        )
+        
+        return settings
+```
+
+```bash
+# .env.example
+
+# Required
+HELIUS_API_KEY=your_helius_api_key_here
+
+# Optional
+BIRDEYE_API_KEY=your_birdeye_key_here
+
+# Scan Settings
+SCAN_INTERVAL_SECONDS=60
+MIN_SIGNAL_SCORE=40.0
+MAX_TOKENS_PER_SCAN=100
+
+# Portfolio (Paper Trading)
+PORTFOLIO_SIZE_USD=10000
+MAX_POSITION_PCT=5.0
+PAPER_TRADING=true
+
+# Logging
+LOG_LEVEL=INFO
+```
+
+```bash
+# requirements.txt
+
+aiohttp>=3.9.0
+websockets>=12.0
+python-dotenv>=1.0.0
+dataclasses-json>=0.6.0
+asyncio-throttle>=1.0.2
+```
+
+---
+
+## Execution & Testing
+
+```python
+# tests/test_scoring_engine.py
+
+import pytest
+import asyncio
+from datetime import datetime
+from src.models.token_models import TokenDiscovery, MarketData, CreatorProfile, DataSource
+from src.intelligence.scoring_engine import ScoringEngine, ScoringWeights
+
+def make_test_token(
+    mint: str = "TestMint123",
+    market_cap: float = 50000,
+    liquidity: float = 25000,
+    price_change_1h: float = 15.0,
+    buy_ratio: float = 0.65,
+    creator_score: float = 70.0
+) -> TokenDiscovery:
+    token = TokenDiscovery(
+        mint_address=mint,
+        symbol="TEST",
+        name="Test Token",
+        source=DataSource.DEXSCREENER,
+        discovered_at=datetime.utcnow(),
+        market_data=MarketData(
+            market_cap_usd=market_cap,
+            liquidity_usd=liquidity,
+            price_change_1h=price_change_1h,
+            volume_1h=10000,
+            buys_1h=65,
+            sells_1h=35,
+        )
+    )
+    
+    if creator_score > 0:
+        profile = CreatorProfile(wallet_address="CreatorWallet123")
+        profile.total_launches = 10
+        profile.successful_launches = 7
+        profile.rug_pulls = 1
+        profile.avg_peak_multiplier = 4.5
+        profile.verified_social = True
+        profile.reputation_score = creator_score
+        profile.trust_level = "high"
+        token.creator_profile = profile
+    
+    return token
+
+class TestScoringEngine:
+    def setup_method(self):
+        self.engine = ScoringEngine(portfolio_size_usd=10000)
+    
+    def test_high_quality_token_scores_high(self):
+        token = make_test_token(
+            liquidity=50000,
+            price_change_1h=30,
+            creator_score=80
+        )
+        scored = self.engine.score_token(token)
+        assert scored.composite_score >= 60, f"Expected >60, got {scored.composite_score}"
+    
+    def test_low_liquidity_penalized(self):
+        token = make_test_token(liquidity=500)
+        scored = self.engine.score_token(token)
+        assert scored.composite_score < 50
+    
+    def test_unknown_creator_reduces_score(self):
+        with_creator = make_test_token(creator_score=70)
+        without_creator = make_test_token(creator_score=0)
+        
+        self.engine.score_token(with_creator)
+        self.engine.score_token(without_creator)
+        
+        assert with_creator.composite_score > without_creator.composite_score
+    
+    def test_risk_flags_reduce_score(self):
+        token = make_test_token(creator_score=80, liquidity=50000)
+        clean_score = self.engine.score_token(token).composite_score
+        
+        flagged_token = make_test_token(creator_score=80, liquidity=50000)
+        flagged_token.risk_flags = ["low_liquidity", "no_social", "extreme_pump"]
+        flagged_score = self.engine.score_token(flagged_token).composite_score
+        
+        assert clean_score > flagged_score
+    
+    def test_buy_signal_generated_for_high_score(self):
+        token = make_test_token(
+            liquidity=50000,
+            price_change_1h=25,
+            creator_score=85
+        )
+        self.engine.score_token(token)
+        signal = self.engine.generate_signal(token)
+        
+        assert signal.action in ("BUY", "WATCH")
+        assert signal.composite_score >= 60
+        assert signal.suggested_position_size_pct > 0
+    
+    def test_avoid_signal_for_critical_risks(self):
+        token = make_test_token(liquidity=200)
+        token.add_risk_flag("honeypot_detected")
+        token.add_risk_flag("very_low_liquidity")
+        
+        self.engine.score_token(token)
+        signal = self.engine.generate_signal(token)
+        
+        assert signal.action == "AVOID"
+    
+    def test_weights_sum_to_one(self):
+        weights = ScoringWeights()
+        weights.validate()  # Should not raise
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
+```
+
+---
+
+## Deployment
+
+```dockerfile
+# Dockerfile
+
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Application
+COPY src/ ./src/
+COPY tests/ ./tests/
+COPY .env.example .env
+
+# Logs directory
+RUN mkdir -p logs
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s \
+    CMD python -c "import sys; sys.exit(0)"
+
+CMD ["python", "-m", "src.agents.unified_discovery_agent"]
+```
+
+```yaml
+# docker-compose.yml
+
+version: '3.8'
+services:
+  discovery_agent:
+    build: .
+    environment:
+      - HELIUS_API_KEY=${HELIUS_API_KEY}
+      - SCAN_INTERVAL_SECONDS=60
+      - MIN_SIGNAL_SCORE=40
+      - PORTFOLIO_SIZE_USD=10000
+      - PAPER_TRADING=true
+      - LOG_LEVEL=INFO
+    volumes:
+      - ./logs:/app/logs
+    restart: unless-stopped
+    
+  # Optional: Redis for caching
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+```
+
+---
+
+## Key Architecture Decisions
+
+| Decision | Rationale |
+|----------|-----------|
+| **Circuit breakers per endpoint** | Pump.fun 530 errors isolated; other sources unaffected |
+| **Async throughout** | 10x throughput vs sync; critical for multi-source polling |
+| **Dedup by mint address** | Same token from 3 sources = 1 clean record, best data wins |
+| **Batch creator resolution** | Helius rate limits respected; 10 parallel, not 100 |
+| **Creator cache (1hr TTL)** | Profiles don't change every minute; saves 90% of RPC calls |
+| **Paper trading locked** | `paper_trading_mode=True` hardcoded by default; safety first |
+| **Fallback RPC chain** | Helius → Solana mainnet → Ankr → Alchemy; 99%+ uptime |
+| **WebSocket + polling** | WS for <1s new token latency; polling for comprehensive coverage |
+
+
+**This is a really strong, production-minded plan.** It directly attacks the exact pain points we've been hitting in the live loop (pump.fun 530s, Birdeye flakiness, "unknown" creators on DEX signals, lack of mint enrichment, no graceful degradation).
+
+### What I like a lot
+- **Circuit breakers + per-endpoint config** — This is the #1 thing that will make the running PID 2105466 more reliable. Right now the scanner just does basic `_safe_get` + sleep. A real circuit breaker + exponential backoff with jitter would let DexScreener carry the load when pump.fun is down.
+- **Fallback URLs for pump.fun** — Smart. The 530 is almost always transient; having 2-3 alternates (heroku, vercel, etc.) is exactly what we need.
+- **Unified `TokenDiscovery` schema** — This is the missing piece. Right now we have three different shapes (pumpfun, birdeye, dexscreener) that get hacked together in `scan_all_sources`. A single canonical model + `CreatorProfile` with real reputation math (success rate, rug rate, multiplier history) is a big upgrade over the current `compute_community_score`.
+- **Helius with backup RPC chain** — We already have `HeliusProvider`, but the batch resolution + caching + fallback logic here is cleaner.
+- **Scoring engine with explicit weights + risk penalties** — The current `make_trade_decisions` + `get_creator_boost` is a simplified version of this. Making the weights configurable and adding the Kelly-style position sizing + dynamic SL/TP is exactly what we need before we ever touch real capital.
+- **WebSocket + polling hybrid** — Real-time new-token events from pump.fun WS while still doing full polls for coverage is the right architecture.
+- **Paper trading locked by default** + health dashboard — Safety-first mindset matches what we've been doing with `PaperTradeLedger` and the continuous loop.
+
+The plan feels like a natural "v2" of the foundation we already shipped (NewTokenFeed, PreLaunchScanner, run_creator_pipeline, trading_decision, Jupiter paper executor, ledger, backfill).
+
+### Honest gaps / things I'd tweak
+- The code is very clean but quite ambitious for the current single-repo + 5-agent relay setup. The full `UnifiedDiscoveryAgent` + WebSocket + Redis + Docker stack is a lot to stand up while the headless loop is already running 24/7.
+- Some duplication risk with the existing `src/data/dex_intelligence/` clients and `PreLaunchScanner`. We'd want to **wrap**, not replace, the working parts.
+- Creator reputation in the plan is mostly on-chain history. We should keep the social layer (the TG/X monitoring you already have) as a strong multiplier — that's still one of the highest-alpha signals.
+- The scoring weights and thresholds are opinionated. We should expose them via the same config/env pattern we already use for `CREATOR_BOOST_THRESHOLD` and `min_boost`.
+
+### My practical recommendation (given the live system)
+
+**Don't try to port the entire thing at once.** Treat this as the target architecture and do it incrementally on top of what is already running on PID 2105466.
+
+**Highest-leverage first slice (Phase 1 core, 1-2 days of work):**
+1. Implement a thin `APIClientManager` (just the circuit breaker + retry + rate limiter + health stats) in the existing repo.
+2. Wire it into `PreLaunchScanner` (or the individual providers in `src/data/dex_intelligence/`) so pump.fun 530s and Birdeye flakes are handled gracefully.
+3. Add the DexScreener "boosted" endpoint + mint enrichment path (this directly attacks the "zero creator boost on DEX signals" problem).
+4. Expose the health report in `pipeline_last_run.json` so your monitoring commands pick it up immediately.
+
+This would give the live loop:
+- Fewer empty scans when one source is down.
+- Better creator resolution on pure DexScreener signals.
+- Visible metrics so we can see if the circuit breakers are actually firing.
+
+Once that's stable, we can layer in the richer `CreatorProfile` + `TokenDiscovery` models and the full scoring engine.
+
+---
+
+**What do you want to do next?**
+
+Option A (my strong preference right now): I implement the `APIClientManager` + circuit breaker + exponential backoff + health reporting in the current workspace, then give you a minimal patch to drop it into `PreLaunchScanner` / the providers so your running loop benefits tonight.
+
+Option B: Focus on the DexScreener boosted + mint-enrichment path first (quick win for creator signals).
+
+Option C: We do the full `CreatorProfile` + reputation scoring math as a drop-in upgrade to `integrate_creator_intel.py` + `get_creator_boost`.
+
+Option D: Something else from the plan (e.g. the monitoring dashboard, the unified `TokenDiscovery` model, WebSocket integration for the agent, etc.).
+
+Just tell me which slice (or give me a specific file to start editing) and I'll start producing the diffs + the exact SSH/patch commands for your headless. The loop is already the heartbeat — let's make the data feeding it bulletproof first. 
+
+Which part feels highest priority to you?

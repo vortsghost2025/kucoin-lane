@@ -86,6 +86,7 @@ docs/research/btc_compounding_sweep_results.json
 
 # Development test files (not for commit)
 test_*.py
+!tests/intelligence/test_live_prelaunch_stream.py
 analyze_data.py
 
 # Scratch/debug scripts (not for commit)
@@ -105,3 +106,7 @@ output.txt
 
 # Config overrides (local only)
 config.json
+
+# Work claim registry (runtime coordination, advisory only)
+lanes/*/state/work-claim.json
+till/.work-claim.json

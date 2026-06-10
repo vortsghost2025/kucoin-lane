@@ -127,6 +127,29 @@ docker_logs 300 | grep "\[INTELLIGENCE\]" | tail -5 | while read -r line; do
 done
 echo ""
 
+# ── Live Pre-Launch Creator Event ──
+echo -e "${BLU}── Live Pre-Launch Creator ──${RST}"
+LIVE=$(docker_exec cat /app/data/latest_live_prelaunch.json 2>/dev/null || echo "{}")
+echo "$LIVE" | python3 -c "
+import sys, json
+try:
+    d = json.loads(sys.stdin.read() or '{}')
+    if not d or not d.get('mint'):
+        print('  No live pre-launch events yet')
+    else:
+        tags = ','.join(d.get('tags', [])) or 'none'
+        intel = d.get('external_creator_intelligence', {}) or {}
+        sources = ','.join(intel.get('source_names', [])) or 'none'
+        print(f\"  Token:     {d.get('symbol','?')} {d.get('mint','')[:10]}...\")
+        print(f\"  Creator:   {d.get('creator','')[:16]}...\")
+        print(f\"  Score:     {d.get('reputation_score', 0):.3f}\")
+        print(f\"  Tags:      {tags}\")
+        print(f\"  Sources:   {sources}\")
+        print(f\"  Updated:   {d.get('timestamp','N/A')}\")
+except Exception as e: print(f'  Parse error: {e}')
+" 2>/dev/null
+echo ""
+
 # ── Paper Trades ──
 echo -e "${BLU}── Paper Trades ──${RST}"
 PT=$(docker_exec cat /app/state/paper_trades_ledger.json 2>/dev/null || echo "[]")

@@ -1,11 +1,11 @@
-"""Prometheus metrics for KuCoin Lane.
-
-This module defines gauges that can be scraped by a Prometheus server.
-Only a minimal set is required for the current task – a gauge tracking
-how many creator‑boost adjustments were applied in the current cycle.
-"""
+"""Prometheus metrics for KuCoin Lane."""
 
 from prometheus_client import Gauge, Counter
+
+
+def _label_value(value: str, max_len: int = 64) -> str:
+    text = str(value or "unknown")
+    return text[:max_len]
 
 # Gauge: total creator boosts applied in the current cycle.
 # This gauge is set at the end of each orchestrator cycle.
@@ -45,3 +45,57 @@ def set_active_creators(value: int) -> None:
 def inc_creator_discoveries(delta: int = 1) -> None:
     """Increment the discovery counter – called once per newly‑seen creator."""
     creator_discoveries_total.inc(delta)
+
+
+# Counter: cumulative live token creation events processed from websocket/webhooks.
+live_token_events_total = Counter(
+    "live_token_events_total",
+    "Cumulative count of live token creation events processed.",
+    ["source", "factory"],
+)
+
+# Gauge: latest externally boosted creator reputation for an observed live token.
+live_creator_reputation_score = Gauge(
+    "live_creator_reputation_score",
+    "Latest externally enriched creator reputation score for a live token event.",
+    ["creator", "mint", "symbol", "tags"],
+)
+
+# Counter: high-frequency/serial/alpha creator launches surfaced for alerting.
+high_frequency_creator_launches_total = Counter(
+    "high_frequency_creator_launches_total",
+    "Cumulative live launches from creators tagged high_frequency, serial_launcher, or alpha.",
+    ["creator", "tag"],
+)
+
+
+def record_live_creator_event(
+    source: str,
+    factory: str,
+    mint: str,
+    symbol: str,
+    creator: str,
+    reputation_score: float,
+    tags: list,
+) -> None:
+    """Record live creator telemetry for Prometheus and dashboards."""
+    tag_values = [str(tag) for tag in tags if tag]
+    tag_label = ",".join(tag_values) or "none"
+
+    live_token_events_total.labels(
+        source=_label_value(source),
+        factory=_label_value(factory),
+    ).inc()
+    live_creator_reputation_score.labels(
+        creator=_label_value(creator),
+        mint=_label_value(mint),
+        symbol=_label_value(symbol, max_len=24),
+        tags=_label_value(tag_label, max_len=128),
+    ).set(float(reputation_score or 0.0))
+
+    for alert_tag in ("serial_launcher", "high_frequency", "alpha"):
+        if alert_tag in tag_values:
+            high_frequency_creator_launches_total.labels(
+                creator=_label_value(creator),
+                tag=alert_tag,
+            ).inc()
