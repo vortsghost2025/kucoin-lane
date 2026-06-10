@@ -29,13 +29,15 @@ from urllib.error import URLError, HTTPError
 from src.data.dex_intelligence.birdeye import BirdeyeProvider
 from src.data.dex_intelligence.dexscreener import DexScreenerProvider
 from src.intelligence.chain.helius_provider import HeliusProvider
-from src.execution.dex_jupiter_executor import get_sol_price_usd
+
+# Load .env for API keys
+from dotenv import load_dotenv
+load_dotenv('S:/kucoin-lane/.env')
 
 logger = logging.getLogger(__name__)
 
 PUMPFUN_BASE = "https://pump.fun"
-PUMPFUN_API = "https://frontend-api-v3.pump.fun"
-PUMPFUN_API_KEY = os.getenv("PUMPFUN_API_KEY", "")
+PUMPFUN_API = "https://frontend-api.pump.fun"
 
 LAUNCH_PLATFORM_KEYWORDS = [
     "rapidlaunch.io",
@@ -81,10 +83,7 @@ def _safe_get(url: str, timeout: int = 15) -> Optional[bytes]:
     elapsed = time.time() - _last_request_time
     if elapsed < _MIN_INTERVAL:
         time.sleep(_MIN_INTERVAL - elapsed)
-    headers = {"User-Agent": "kucoin-lane-prelaunch/1.0", "Accept": "application/json"}
-    if PUMPFUN_API_KEY:
-        headers["Authorization"] = f"Bearer {PUMPFUN_API_KEY}"
-    req = Request(url, headers=headers)
+    req = Request(url, headers={"User-Agent": "kucoin-lane-prelaunch/1.0", "Accept": "application/json"})
     try:
         resp = urlopen(req, timeout=timeout)
         _last_request_time = time.time()
@@ -439,26 +438,7 @@ class PreLaunchScanner:
 
         creator_rep = self._score_creator(creator, coin)
 
-        # Extract REAL bonding curve data from Pump.fun v3 API
-        virtual_sol_reserves = coin.get("virtual_sol_reserves", 0)
-        virtual_token_reserves = coin.get("virtual_token_reserves", 0)
-        market_cap_quote = coin.get("market_cap_quote", 0)  # in quote token (SOL)
-        usd_market_cap = coin.get("usd_market_cap", 0)
-
-        # Calculate REAL pre-liquidity price from bonding curve
-        real_prelaunch_price_usd = None
-        if virtual_sol_reserves and virtual_token_reserves:
-            try:
-                sol_price = get_sol_price_usd()
-                # v3 returns lamports for SOL, token amount in base units
-                # Price = (virtual_sol_reserves / virtual_token_reserves) * sol_price * 1e9 (adjust lamports to SOL)
-                price_sol = (virtual_sol_reserves / virtual_token_reserves) * 1e9  # SOL per token
-                real_prelaunch_price_usd = price_sol * sol_price
-            except Exception as e:
-                print(f"[PRELAUNCH] Failed to calc real price for {mint}: {e}")
-
-        # Use REAL market cap from bonding curve if available
-        market_cap = usd_market_cap or coin.get("market_cap", coin.get("market_cap_quote", 0)) or 0
+        market_cap = coin.get("market_cap", coin.get("usd_market_cap", 0)) or 0
         created_at = coin.get("created_at", coin.get("pairCreatedAt", 0))
 
         token_data = {
@@ -473,7 +453,6 @@ class PreLaunchScanner:
             "n_social_platforms": len(social_links),
             "launch_platforms": launch_platforms,
             "creator_reputation": creator_rep,
-            "real_prelaunch_price_usd": real_prelaunch_price_usd,
         }
 
         community_score = compute_community_score(token_data)

@@ -77,6 +77,65 @@ def rate_limit_jupiter(min_interval: float = 0.2):
         _last_jupiter_call = now
 
 
+# SOL price cache (valid for 30 seconds)
+_sol_price_cache = {"price": None, "timestamp": 0}
+_sol_price_lock = None
+try:
+    import threading
+    _sol_price_lock = threading.Lock()
+except ImportError:
+    pass
+
+
+def get_sol_price_usd() -> float:
+    """Get real SOL price in USD from Jupiter or fallback to CoinGecko."""
+    global _sol_price_cache
+    now = time.time()
+    if _sol_price_lock:
+        with _sol_price_lock:
+            if _sol_price_cache["price"] and (now - _sol_price_cache["timestamp"] < 30):
+                return _sol_price_cache["price"]
+    else:
+        if _sol_price_cache["price"] and (now - _sol_price_cache["timestamp"] < 30):
+            return _sol_price_cache["price"]
+
+    # Try Jupiter price API first (quote USDC/SOL)
+    try:
+        resp = requests.get(
+            "https://api.jup.ag/swap/v1/quote",
+            params={
+                "inputMint": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",  # USDC
+                "outputMint": "So11111111111111111111111111111111111111112",  # SOL
+                "amount": "1000000",  # 1 USDC
+                "slippageBps": "50",
+            },
+            timeout=10,
+        )
+        data = resp.json()
+        out_amount = float(data.get("outAmount", 0))
+        if out_amount > 0:
+            sol_per_usdc = out_amount / 1_000_000_000
+            sol_price = 1.0 / sol_per_usdc
+            _sol_price_cache = {"price": sol_price, "timestamp": time.time()}
+            return sol_price
+    except Exception:
+        pass
+
+    # Fallback to CoinGecko
+    try:
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": "solana", "vs_currencies": "usd"},
+            timeout=10,
+        )
+        data = resp.json()
+        sol_price = float(data.get("solana", {}).get("usd", 150.0))
+        _sol_price_cache = {"price": sol_price, "timestamp": time.time()}
+        return sol_price
+    except Exception:
+        return 150.0
+
+
 class JupiterDexExecutor:
     """Execute DEX swaps on Solana via Jupiter aggregator."""
 

@@ -63,12 +63,11 @@ class HeliusProvider:
     def __init__(self, api_key: Optional[str] = None, rpc_url: Optional[str] = None):
         self.api_key = api_key or os.getenv("HELIUS_API_KEY")
         self.rpc_url = rpc_url or os.getenv("SOLANA_RPC_URL")
-        if not self.rpc_url or "YOUR_HELIUS_API_KEY" in (self.rpc_url or ""):
+        if not self.rpc_url or "YOUR_HELIUS_API_KEY" in self.rpc_url:
             # Build from api_key if needed
-            if self.api_key and "api-key=" not in (self.rpc_url or ""):
+            if self.api_key and "api-key=" not in self.rpc_url:
                 self.rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
-        url_preview = (self.rpc_url or "no-rpc-configured")[:50]
-        logger.info(f"HeliusProvider initialized: {url_preview}...")
+        logger.info(f"HeliusProvider initialized: {self.rpc_url[:50]}...")
 
     def get_mint_creator(self, mint: str) -> Optional[str]:
         """

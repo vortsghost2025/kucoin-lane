@@ -546,6 +546,21 @@ class CreatorTrackerAgent(BaseAgent):
         n_social = len(profile.social_links)
         profile.performance_metrics["n_social_platforms"] = n_social
 
+        profile.tags = [t for t in profile.tags if t not in ("alpha", "repeat", "risky", "high_frequency", "serial_launcher")]
+        if profile.reputation_score > 0.8:
+            profile.tags.append("alpha")
+        elif profile.reputation_score > 0.5:
+            profile.tags.append("repeat")
+        if profile.safety_summary.get("avoid"):
+            profile.tags.append("risky")
+        if len(history) >= 5:
+            profile.tags.append("high_frequency")
+        if len(history) >= 10:
+            profile.tags.append("serial_launcher")
+
+        n_social = len(profile.social_links)
+        profile.performance_metrics["n_social_platforms"] = n_social
+
     def _apply_pattern_consistency(self, profile: CreatorProfile, pattern: LaunchPattern) -> None:
         n_tokens = len(profile.token_history)
         if n_tokens < 2:

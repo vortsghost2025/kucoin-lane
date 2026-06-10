@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 from ..base_agent import BaseAgent, AgentStatus
 
-from .creator_intel import get_creator_boost
+from integrate_creator_intel import get_creator_boost
 from ..config import REGIME_GUARD_MODE, SPOT_LONG_ONLY, CREATOR_BOOST_THRESHOLD
 from ..monitoring.metrics import set_creator_boosts
 from ..risk.circuit_breaker import CircuitBreaker
