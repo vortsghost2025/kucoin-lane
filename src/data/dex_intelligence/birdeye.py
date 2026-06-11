@@ -24,6 +24,7 @@ from urllib.error import URLError, HTTPError
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://public-api.birdeye.so"
+_BIRDEYE_MAX_LIMIT = 20  # Free tier hard cap per docs
 _MIN_INTERVAL = 0.6  # ~100 req/min free tier
 _last_call_ts = 0.0
 _lock = threading.Lock()
@@ -72,22 +73,10 @@ class BirdeyeProvider:
             logger.warning("Birdeye API key not configured - some endpoints may fail")
 
     def new_tokens(self, chain: Optional[str] = None, limit: int = 50, offset: int = 0) -> List[Dict[str, Any]]:
-        """Get newly created tokens (token_creation_info endpoint)."""
+        """Get newly created tokens via Birdeye v2 new_listing (free tier, max 20)."""
         c = chain or self.chain
-        # Try the newer v2 endpoint first
+        limit = min(limit, _BIRDEYE_MAX_LIMIT)
         url = f"{_BASE_URL}/defi/v2/tokens/new_listing?chain={c}&limit={limit}&offset={offset}"
-        raw = _safe_get(url, self.headers)
-        if raw:
-            try:
-                data = json.loads(raw)
-                items = data.get("data", {}).get("items", []) if isinstance(data.get("data"), dict) else data.get("data", [])
-                if items:
-                    return items
-            except (json.JSONDecodeError, TypeError):
-                pass
-        
-        # Fallback to token_creation_info
-        url = f"{_BASE_URL}/defi/token_creation_info?chain={c}&limit={limit}&offset={offset}"
         raw = _safe_get(url, self.headers)
         if not raw:
             return []
@@ -95,7 +84,8 @@ class BirdeyeProvider:
             data = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             return []
-        return data.get("data", {}).get("items", []) if isinstance(data.get("data"), dict) else []
+        items = data.get("data", {}).get("items", []) if isinstance(data.get("data"), dict) else data.get("data", [])
+        return items if isinstance(items, list) else []
 
     def token_overview(self, token_address: str, chain: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Get detailed token overview including social links, creator info."""
