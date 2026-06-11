@@ -33,27 +33,27 @@ def scan_phantom(limit=50, min_market_cap=0, min_liquidity=0):
 
 def scan_pumpfun(limit=50, min_market_cap=0, min_liquidity=0):
     """Scan PumpFun for new launches."""
-    from data.dex_intelligence.pumpfun import scan_pumpfun_launches
+    from src.data.dex_intelligence.pumpfun import scan_pumpfun_launches
     tokens = scan_pumpfun_launches(limit=limit)
     return [t for t in tokens if t.get("marketCap", 0) >= min_market_cap and t.get("liquidity", 0) >= min_liquidity]
 
 def scan_birdeye(limit=50, min_market_cap=0, min_liquidity=0):
     """Scan Birdeye for new pairs."""
-    from data.dex_intelligence.birdeye import BirdeyeProvider
+    from src.data.dex_intelligence.birdeye import BirdeyeProvider
     provider = BirdeyeProvider()
     tokens = provider.get_new_pairs(limit=limit)
     return [t for t in tokens if t.get("marketCap", 0) >= min_market_cap and t.get("liquidity", 0) >= min_liquidity]
 
 def scan_dexscreener(limit=50, min_market_cap=0, min_liquidity=0):
     """Scan DexScreener for new pairs."""
-    from data.dex_intelligence.dexscreener import DexScreenerProvider
+    from src.data.dex_intelligence.dexscreener import DexScreenerProvider
     provider = DexScreenerProvider()
     tokens = provider.new_pairs(chain_id="solana", limit=limit)
     return [t for t in tokens if t.get("marketCap", 0) >= min_market_cap and t.get("liquidity", 0) >= min_liquidity]
 
 def scan_polymarket(limit=50):
     """Scan Polymarket for crypto odds."""
-    from data.dex_intelligence.polymarket import get_polymarket_provider
+    from src.data.dex_intelligence.polymarket import get_polymarket_provider
     provider = get_polymarket_provider()
     return provider.get_crypto_events(limit=limit)
 
