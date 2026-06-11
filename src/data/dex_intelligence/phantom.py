@@ -92,12 +92,12 @@ class PhantomLauncherScanner:
     def __init__(self):
         self.launch_url = 'https://trade.phantom.com/launches'
     
-    def fetch_launch_data(self) -> Optional[Dict[str, Any]]:
+    def fetch_launch_data(self) -> Optional[str]:
         """
         Fetch raw launch data from Phantom.com.
         
         Returns:
-            Raw response data or None if failed
+            Raw HTML response or None if failed
         """
         try:
             import httpx
@@ -136,39 +136,146 @@ class PhantomLauncherScanner:
                 if 'initialData' in script_content and 'NEW' in script_content:
                     logger.info("Found Phantom.com initialData in script tag")
                     
-                    # Extract the initialData portion
-                    # Look for the pattern: initialData":"{...} or initialData': '{...}
-                    # Based on the user's data, it appears to be: initialData":{
+                    # Look for the pattern: initialData\":{
+                    # Based on the user's data, it appears to be: initialData\":{
+                    pattern_to_match = '\\"initialData\\":{'
+                    pattern = re.escape(pattern_to_match)
                     
-                    # Try to find the JSON data
-                    # Match initialData: { ... } or initialData": { ... } etc.
-                    json_pattern = r'initialData["\']?\s*:\s*["\']?\s*({.*?})\s*}}'
-                    json_match = re.search(json_pattern, script_content, re.DOTALL)
-                    
-                    if json_match:
-                        json_str = json_match.group(1)
-                        logger.debug(f"Extracted JSON string: {json_str[:200]}...")
+                    match = re.search(pattern, script_content)
+                    if match:
+                        logger.info("Found escaped initialData pattern")
                         
-                        # Parse the Next.js serialized data
-                        parsed_data = parse_nextjs_serialized_data(json_str)
+                        # The pattern we matched is \"initialData\":{
+                        # This is: backslash, quote, i, n, i, t, i, a, l, D, a, t, a, quote, colon, brace
+                        # The opening brace of the JSON object is the last character of the match
+                        # So the JSON object starts at match.end() - 1
                         
-                        if isinstance(parsed_data, dict) and 'NEW' in parsed_data:
-                            new_tokens = parsed_data['NEW']
-                            logger.info(f"Found {len(new_tokens)} new tokens from Phantom.com")
+                        json_object_start = match.end() - 1
+                        logger.debug(f"JSON object starts at index {json_object_start} (end of match minus 1)")
+                        
+                        # Verify this is indeed an opening brace
+                        if json_object_start >= len(script_content) or script_content[json_object_start] != '{':
+                            logger.error(f"Expected opening brace at index {json_object_start}, got {repr(script_content[json_object_start] if json_object_start < len(script_content) else 'OUT_OF_BOUNDS')}")
+                            # Try to find the opening brace manually
+                            brace_pos = script_content.find('{', match.end())
+                            if brace_pos != -1:
+                                json_object_start = brace_pos
+                                logger.debug(f"Found opening brace at index {json_object_start} instead")
+                            else:
+                                logger.error("Could not find opening brace after pattern")
+                                continue
+                        
+                        # Now we need to find the end of the JSON object by matching braces
+                        brace_count = 0
+                        pos = json_object_start
+                        
+                        # Now scan for matching braces (we start with the opening brace we just found)
+                        while pos < len(script_content) and brace_count >= 0:
+                            if script_content[pos] == '{':
+                                brace_count += 1
+                            elif script_content[pos] == '}':
+                                brace_count -= 1
+                                if brace_count == 0:
+                                    pos += 1  # Include the closing brace in the extract
+                                    break
+                            pos += 1
+                        
+                        if brace_count == 0:
+                            # Found the matching closing brace, extract from json_object_start to pos
+                            json_str = script_content[json_object_start:pos]
+                            logger.debug(f"Extracted JSON object (length {len(json_str)})")
+                            logger.debug(f"Extracted: {repr(json_str[:200])}...")
                             
-                            # Convert to standardized format
-                            for token_data in new_tokens:
-                                standardized_token = self._standardize_token(token_data)
-                                if standardized_token:
-                                    tokens.append(standardized_token)
+                            # Now unescape it
+                            # Replace \\\" with " (unescape escaped quotes)
+                            unescaped = json_str.replace('\\"', '"')
+                            # Replace \\/ with / if needed (unescape escaped slashes)
+                            unescaped = unescaped.replace('\\/', '/')
+                            logger.debug(f"After unescaping: {repr(unescaped[:200])}...")
+                            
+                            # Try to parse as JSON first
+                            try:
+                                parsed_data = json.loads(unescaped)
+                                logger.info("Successfully parsed as JSON")
+                                
+                                # If it's a dict and has NEW field, process it
+                                if isinstance(parsed_data, dict) and 'NEW' in parsed_data:
+                                    new_tokens = parsed_data['NEW']
+                                    logger.info(f"Found {len(new_tokens)} new tokens from Phantom.com")
+                                    
+                                    # Convert to standardized format
+                                    for token_data in new_tokens:
+                                        standardized_token = self._standardize_token(token_data)
+                                        if standardized_token:
+                                            tokens.append(standardized_token)
+                                else:
+                                    # If not in expected format, try the Next.js parser as fallback
+                                    logger.warning("Parsed data doesn't contain expected 'NEW' field, trying Next.js parser")
+                                    parsed_data = parse_nextjs_serialized_data(unescaped)
+                                    if isinstance(parsed_data, dict) and 'NEW' in parsed_data:
+                                        new_tokens = parsed_data['NEW']
+                                        logger.info(f"Found {len(new_tokens)} new tokens from Phantom.com (via Next.js parser)")
+                                        
+                                        # Convert to standardized format
+                                        for token_data in new_tokens:
+                                            standardized_token = self._standardize_token(token_data)
+                                            if standardized_token:
+                                                tokens.append(standardized_token)
+                                    else:
+                                        logger.warning("Parsed data (via Next.js parser) doesn't contain expected 'NEW' field")
+                                
+                            except json.JSONDecodeError as e:
+                                logger.warning(f"Failed to parse as JSON: {e}")
+                                # Try the Next.js parser as fallback
+                                logger.info("Trying Next.js parser as fallback")
+                                parsed_data = parse_nextjs_serialized_data(unescaped)
+                                if isinstance(parsed_data, dict) and 'NEW' in parsed_data:
+                                    new_tokens = parsed_data['NEW']
+                                    logger.info(f"Found {len(new_tokens)} new tokens from Phantom.com (via Next.js parser)")
+                                    
+                                    # Convert to standardized format
+                                    for token_data in new_tokens:
+                                        standardized_token = self._standardize_token(token_data)
+                                        if standardized_token:
+                                            tokens.append(standardized_token)
+                                else:
+                                    logger.warning("Parsed data (via Next.js parser) doesn't contain expected 'NEW' field")
                         else:
-                            logger.warning("Parsed data doesn't contain expected 'NEW' field")
+                            logger.warning("Could not find matching closing brace for JSON object")
                     else:
-                        logger.warning("Could not extract JSON from initialData")
+                        logger.warning("Could not find escaped initialData pattern, trying alternative approaches")
+                        
+                        # Fallback to the original pattern for compatibility
+                        # Look for the pattern: initialData":"{...} or initialData': '{...}
+                        json_pattern = r'initialData["\']?\s*:\s*["\']?\s*({.*?})\s*}}'
+                        json_match = re.search(json_pattern, script_content, re.DOTALL)
+                        
+                        if json_match:
+                            json_str = json_match.group(1)
+                            logger.debug(f"Extracted JSON string with fallback pattern: {json_str[:200]}...")
+                            
+                            # Parse the Next.js serialized data
+                            parsed_data = parse_nextjs_serialized_data(json_str)
+                            
+                            if isinstance(parsed_data, dict) and 'NEW' in parsed_data:
+                                new_tokens = parsed_data['NEW']
+                                logger.info(f"Found {len(new_tokens)} new tokens from Phantom.com (fallback)")
+                                
+                                # Convert to standardized format
+                                for token_data in new_tokens:
+                                    standardized_token = self._standardize_token(token_data)
+                                    if standardized_token:
+                                        tokens.append(standardized_token)
+                            else:
+                                logger.warning("Parsed data (fallback) doesn't contain expected 'NEW' field")
+                        else:
+                            logger.warning("Could not extract JSON from initialData with fallback pattern")
+                    
                     break  # We found what we needed, no need to check other scripts
                     
         except Exception as e:
             logger.error(f"Error parsing Phantom.com launch data: {e}")
+            logger.debug(f"Error details: {e}", exc_info=True)
         
         return tokens
     
