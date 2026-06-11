@@ -104,6 +104,13 @@ output.txt
 # Keep the re-export wrapper
 !integrate_creator_intel.py
 
+# Opencode session data
+.opencode/
+
+# Backup/runtime files
+*.bak
+*.headless
+
 # Config overrides (local only)
 config.json
 

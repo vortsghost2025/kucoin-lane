@@ -15,7 +15,7 @@ Used by run_pipeline.py for both DEX pre-launch watchlists and KuCoin signals.
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 
-from integrate_creator_intel import get_creator_boost
+from src.intelligence.creator_intel import get_creator_boost
 from .chain.token_models import TokenInfo
 
 
@@ -81,7 +81,7 @@ def make_trade_decisions(
     Core function: turn a list of fresh pre-launch / new tokens into trade decisions.
 
     Applies:
-    - Creator boost from integrate_creator_intel (uses creator_registry.json).
+    - Creator boost from src.intelligence.creator_intel (uses creator_registry.json).
     - Community score filter.
     - Simple position limit.
     - Returns prioritized list of BUY/WATCH/SKIP decisions.

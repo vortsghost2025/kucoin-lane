@@ -19,7 +19,7 @@ def get_creator_boost(token_symbol: str) -> float:
         float: Creator reputation score between 0.0 and 1.0, or 0.0 if not found
     """
     try:
-        registry_path = Path("data/creator_registry.json")
+        registry_path = Path(__file__).resolve().parent.parent.parent / "data" / "creator_registry.json"
         if not registry_path.exists():
             return 0.0
 
