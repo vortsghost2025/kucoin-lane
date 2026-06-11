@@ -227,6 +227,8 @@ class CreatorTrackerAgent(BaseAgent):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         data = {}
         for cid, p in self.creator_profiles.items():
+            if cid == "unknown":
+                continue
             d = vars(p).copy()
             d["launch_pattern"] = vars(p.launch_pattern) if isinstance(p.launch_pattern, LaunchPattern) else p.launch_pattern
             data[cid] = d

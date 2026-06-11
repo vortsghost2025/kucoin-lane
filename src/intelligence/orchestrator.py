@@ -1122,7 +1122,7 @@ class IntelligenceOrchestrator(BaseAgent):
 
                         try:
                             creator_boost = get_creator_boost(creator)
-                            if creator_boost > self.creator_boost_threshold and isinstance(pair_analysis_from_market, dict):
+                            if creator_boost >= self.creator_boost_threshold and isinstance(pair_analysis_from_market, dict):
                                 current_strength = pair_analysis_from_market.get("signal_strength", 0.0)
                                 if current_strength > 0:
                                     boosted = min(1.0, current_strength * creator_boost)

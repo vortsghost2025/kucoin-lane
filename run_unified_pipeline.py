@@ -261,9 +261,14 @@ def make_trade_decisions(
                 "community_score": signal.get("composite_score", 0.0),
                 "pre_launch_tier": "SPECULATIVE",
                 "creator_wallet": signal.get("deployer", "unknown"),
-                "creator_boost": 1.0,
-            })
-    
+        "creator_boost": 1.0,
+    })
+
+    from src.intelligence.creator_intel import get_creator_boost
+    for token in enriched_tokens:
+        wallet = token.get("creator") or token.get("creator_wallet") or token.get("deployer", "unknown")
+        token["creator_boost"] = get_creator_boost(wallet)
+
     # Convert dicts to TokenInfo objects
     from src.intelligence.chain.token_models import tokens_to_tokeninfo_list
     token_infos = tokens_to_tokeninfo_list(enriched_tokens)

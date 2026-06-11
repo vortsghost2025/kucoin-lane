@@ -67,8 +67,8 @@ class HeliusProvider:
             # Build from api_key if needed
             if self.api_key and "api-key=" not in (self.rpc_url or ""):
                 self.rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
-        url_preview = (self.rpc_url or "no-rpc-configured")[:50]
-        logger.info(f"HeliusProvider initialized: {url_preview}...")
+        url_preview = (self.rpc_url or "no-rpc-configured").rsplit("api-key=", 1)[0] if self.rpc_url else "no-rpc-configured"
+        logger.info(f"HeliusProvider initialized: {url_preview}api-key=***")
 
     def get_transaction(self, signature: str) -> Optional[Dict[str, Any]]:
         """Fetch a parsed transaction by signature."""

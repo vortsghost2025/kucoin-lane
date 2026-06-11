@@ -67,7 +67,8 @@ class HeliusProvider:
             # Build from api_key if needed
             if self.api_key and "api-key=" not in self.rpc_url:
                 self.rpc_url = f"https://mainnet.helius-rpc.com/?api-key={self.api_key}"
-        logger.info(f"HeliusProvider initialized: {self.rpc_url[:50]}...")
+            url_preview = self.rpc_url.rsplit("api-key=", 1)[0] if self.rpc_url else "no-rpc-configured"
+            logger.info(f"HeliusProvider initialized: {url_preview}api-key=***")
 
     def get_mint_creator(self, mint: str) -> Optional[str]:
         """

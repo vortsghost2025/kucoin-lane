@@ -65,7 +65,7 @@ class TokenInfo:
         return cls(
             mint=data.get("mint", ""),
             ticker=data.get("ticker", ""),
-            creator=data.get("creator", ""),
+            creator=data.get("creator") or data.get("creator_wallet") or data.get("deployer") or "",
             community_score=float(data.get("community_score", 0.0)),
             pre_launch_tier=data.get("pre_launch_tier", "unknown"),
             market_cap_usd=float(data.get("market_cap_usd", 0.0)),
