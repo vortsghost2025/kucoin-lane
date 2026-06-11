@@ -6,16 +6,18 @@ import argparse
 import json
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
+# Add project root and .agents/ to path for absolute imports
+_repo = str(Path(__file__).parent.parent.parent)
+_agents = str(Path(__file__).parent.parent)
+sys.path.insert(0, _repo)
+sys.path.insert(0, _agents)
 
-import sys, os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from context import read_context, write_context, update_context, record_scan_result, update_api_latency
 
 def scan_phantom(limit=50, min_market_cap=0, min_liquidity=0):
     """Scan Phantom.com for new launches."""
     # Import the actual scanner
-    from data.dex_intelligence.phantom import PhantomLauncherScanner
+    from src.data.dex_intelligence.phantom import PhantomLauncherScanner
     
     scanner = PhantomLauncherScanner()
     tokens = scanner.scan_new_launches()

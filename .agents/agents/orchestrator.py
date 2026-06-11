@@ -8,7 +8,7 @@ import time
 import subprocess
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))

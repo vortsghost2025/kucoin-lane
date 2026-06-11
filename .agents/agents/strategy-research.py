@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 def run_backtest(bars=500, pairs="SOL/USDT", interval="1h"):

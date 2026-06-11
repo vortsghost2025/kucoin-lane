@@ -8,7 +8,7 @@ import os
 import subprocess
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 OPS_DIR = Path(__file__).parent.parent.parent / "ops"
 SYSTEMD_DIR = OPS_DIR / "systemd" / "user"
