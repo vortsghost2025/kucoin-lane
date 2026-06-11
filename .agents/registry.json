@@ -1,0 +1,273 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2026-06-10T19:30:00Z",
+  "agents": {
+    "dex-scanner": {
+      "name": "dex-scanner",
+      "description": "DEX Intelligence Scanner — Phantom, PumpFun, Birdeye, DexScreener, Polymarket",
+      "version": "1.0.0",
+      "entry_point": ".agents/agents/dex-scanner.py",
+      "skills": [
+        "identify-assumptions-new",
+        "brainstorm-experiments-new",
+        "prioritize-assumptions",
+        "competitor-analysis",
+        "test-driven-development",
+        "debugging-and-error-recovery",
+        "source-driven-development"
+      ],
+      "invocation_pattern": "@dex-scanner scan --source <source|all>",
+      "input_schema": {
+        "action": {"type": "string", "enum": ["scan", "status"]},
+        "source": {"type": "string", "enum": ["phantom", "pumpfun", "birdeye", "dexscreener", "polymarket", "all"]},
+        "limit": {"type": "integer", "default": 50},
+        "min_market_cap": {"type": "number", "default": 0},
+        "min_liquidity": {"type": "number", "default": 0}
+      },
+      "output_schema": {
+        "success": "boolean",
+        "scan_time": "ISO8601",
+        "source": "string",
+        "tokens_found": "integer",
+        "tokens": "array",
+        "errors": "array"
+      },
+      "context_reads": [],
+      "context_writes": ["scan_results.*", "health.api_latency.*", "health.anomalies"],
+      "timeouts": {"scan": 30, "total": 60},
+      "feature_flag": "phantom_scanner"
+    },
+    "trader": {
+      "name": "trader",
+      "description": "Trading Execution Engine — Jupiter DEX paper, KuCoin margin, SL/TP monitoring",
+      "version": "1.0.0",
+      "entry_point": ".agents/agents/trader.py",
+      "skills": [
+        "incremental-implementation",
+        "test-driven-development",
+        "security-and-hardening",
+        "api-and-interface-design",
+        "test-scenarios"
+      ],
+      "invocation_pattern": "@trader execute --side <buy|sell> --mint <addr> --sol <amount>",
+      "input_schema": {
+        "action": {"type": "string", "enum": ["execute", "monitor", "positions"]},
+        "side": {"type": "string", "enum": ["buy", "sell"]},
+        "mint": {"type": "string"},
+        "sol": {"type": "number", "default": 0.05},
+        "amount_pct": {"type": "number", "default": 100},
+        "sl": {"type": "number", "default": 0.85},
+        "tp": {"type": "number", "default": 1.5},
+        "venue": {"type": "string", "enum": ["jupiter", "kucoin"], "default": "jupiter"}
+      },
+      "output_schema": {
+        "success": "boolean",
+        "trade": "object"
+      },
+      "context_reads": ["scan_results.*", "creator_registry.*", "circuit_breakers.*", "market_regime.*"],
+      "context_writes": ["positions.*", "health.api_latency.jupiter", "health.api_latency.kucoin"],
+      "timeouts": {"execute": 10, "monitor": 5},
+      "feature_flag": "kucoin_live"
+    },
+    "risk-mgr": {
+      "name": "risk-mgr",
+      "description": "Risk Management & Safety — Circuit breakers, Kelly criterion, position sizing",
+      "version": "1.0.0",
+      "entry_point": ".agents/agents/risk-mgr.py",
+      "skills": [
+        "security-and-hardening",
+        "pre-mortem",
+        "strategy-red-team",
+        "code-review-and-quality",
+        "swot-analysis"
+      ],
+      "invocation_pattern": "@risk-mgr check --mint <addr> --sol <amount> --side <buy|sell>",
+      "input_schema": {
+        "action": {"type": "string", "enum": ["check", "status", "trip", "reset"]},
+        "mint": {"type": "string"},
+        "sol": {"type": "number"},
+        "side": {"type": "string", "enum": ["buy", "sell"]},
+        "name": {"type": "string"},
+        "reason": {"type": "string"}
+      },
+      "output_schema": {
+        "verdict": {"type": "string", "enum": ["ALLOW", "BLOCK", "REDUCE"]},
+        "position_size_sol": "number",
+        "rationale": "array",
+        "checks": "object",
+        "circuit_breakers": "object"
+      },
+      "context_reads": ["positions.*", "creator_registry.*", "market_regime.*", "scan_results.*"],
+      "context_writes": ["circuit_breakers.*", "health.anomalies", "health.alerts"],
+      "timeouts": {"check": 0.2},
+      "feature_flag": "risk_management"
+    },
+    "creator-intel": {
+      "name": "creator-intel",
+      "description": "Creator Intelligence & Reputation — Helius resolution, alpha detection, serial launchers",
+      "version": "1.0.0",
+      "entry_point": ".agents/agents/creator-intel.py",
+      "skills": [
+        "opportunity-solution-tree",
+        "prioritize-features",
+        "user-segmentation",
+        "cohort-analysis",
+        "source-driven-development"
+      ],
+      "invocation_pattern": "@creator-intel resolve --mint <addr> --helius",
+      "input_schema": {
+        "action": {"type": "string", "enum": ["resolve", "bulk", "profile", "alphas"]},
+        "mint": {"type": "string"},
+        "wallet": {"type": "string"},
+        "source": {"type": "string"},
+        "limit": {"type": "integer", "default": 50},
+        "min_score": {"type": "number", "default": 0.7}
+      },
+      "output_schema": {
+        "success": "boolean",
+        "creator": "object"
+      },
+      "context_reads": ["scan_results.*"],
+      "context_writes": ["creator_registry.*", "health.api_latency.helius"],
+      "timeouts": {"resolve": 2, "bulk": 30},
+      "feature_flag": "creator_intel"
+    },
+    "orchestrator": {
+      "name": "orchestrator",
+      "description": "Pipeline Orchestrator — Continuous cycles, state management, signal coordination",
+      "version": "1.0.0",
+      "entry_point": ".agents/agents/orchestrator.py",
+      "skills": [
+        "ci-cd-and-automation",
+        "sprint-plan",
+        "outcome-roadmap",
+        "git-workflow-and-versioning",
+        "summarize-meeting"
+      ],
+      "invocation_pattern": "@orchestrator run-cycle --interval 15",
+      "input_schema": {
+        "action": {"type": "string", "enum": ["run-cycle", "run-continuous", "status", "signal-log", "pause", "resume"]},
+        "interval": {"type": "integer", "default": 15},
+        "max_cycles": {"type": "integer", "default": 0},
+        "cycles": {"type": "integer", "default": 10}
+      },
+      "output_schema": {
+        "success": "boolean",
+        "cycle": "integer",
+        "signal_log": "object"
+      },
+      "context_reads": ["pipeline.*", "positions.*", "scan_results.*", "creator_registry.*", "circuit_breakers.*", "market_regime.*"],
+      "context_writes": ["pipeline.*", "cycle", "metadata.started_at"],
+      "timeouts": {"cycle": 90, "scan": 60, "creator": 30, "risk": 5, "execute": 30},
+      "feature_flag": "pipeline_enabled"
+    },
+    "monitor": {
+      "name": "monitor",
+      "description": "Monitoring, Metrics & Alerting — Prometheus, health checks, anomaly detection",
+      "version": "1.0.0",
+      "entry_point": ".agents/agents/monitor.py",
+      "skills": [
+        "cohort-analysis",
+        "ab-test-analysis",
+        "metrics-dashboard",
+        "performance-optimization",
+        "debugging-and-error-recovery"
+      ],
+      "invocation_pattern": "@monitor health --full",
+      "input_schema": {
+        "action": {"type": "string", "enum": ["health", "status", "pnl", "anomalies", "metrics"]},
+        "full": {"type": "boolean", "default": false},
+        "period": {"type": "string", "default": "24h"},
+        "since": {"type": "string", "default": "1h"},
+        "format": {"type": "string", "enum": ["prometheus", "json"], "default": "prometheus"}
+      },
+      "output_schema": {
+        "success": "boolean",
+        "health": "object",
+        "metrics": "string"
+      },
+      "context_reads": ["positions.*", "health.*", "pipeline.*", "market_regime.*", "circuit_breakers.*"],
+      "context_writes": ["health.*"],
+      "timeouts": {"health": 2, "metrics": 0.1},
+      "feature_flag": "anomaly_detection"
+    },
+    "strategy-research": {
+      "name": "strategy-research",
+      "description": "Strategy Research & Backtesting — Backtesting, hyperparameter optimization, regime detection",
+      "version": "1.0.0",
+      "entry_point": ".agents/agents/strategy-research.py",
+      "skills": [
+        "cohort-analysis",
+        "ab-test-analysis",
+        "product-strategy",
+        "prioritization-frameworks",
+        "source-driven-development"
+      ],
+      "invocation_pattern": "@strategy-research backtest --bars 500 --pairs SOL/USDT",
+      "input_schema": {
+        "action": {"type": "string", "enum": ["backtest", "optimize", "regime", "whales", "report"]},
+        "bars": {"type": "integer", "default": 500},
+        "pairs": {"type": "string", "default": "SOL/USDT"},
+        "interval": {"type": "string", "default": "1h"},
+        "param": {"type": "string"},
+        "range": {"type": "string"},
+        "trials": {"type": "integer", "default": 100},
+        "lookback": {"type": "integer", "default": 200},
+        "method": {"type": "string", "enum": ["hmm", "threshold", "kmeans"], "default": "hmm"},
+        "mint": {"type": "string"},
+        "last": {"type": "integer", "default": 10}
+      },
+      "output_schema": {
+        "success": "boolean",
+        "report": "object"
+      },
+      "context_reads": ["positions.closed_recent", "scan_results.*", "creator_registry.*", "market_regime.*"],
+      "context_writes": [],
+      "timeouts": {"backtest": 60, "optimize": 300, "regime": 30},
+      "feature_flag": "backtesting_enabled"
+    },
+    "deploy-ops": {
+      "name": "deploy-ops",
+      "description": "Deployment & Operations — Systemd, Docker, CI/CD, secrets, production deployment",
+      "version": "1.0.0",
+      "entry_point": ".agents/agents/deploy-ops.py",
+      "skills": [
+        "ci-cd-and-automation",
+        "shipping-and-launch",
+        "security-and-hardening",
+        "git-workflow-and-versioning",
+        "shipping-artifacts",
+        "intended-vs-implemented",
+        "security-audit-static"
+      ],
+      "invocation_pattern": "@deploy-ops deploy --target systemd --env prod",
+      "input_schema": {
+        "action": {"type": "string", "enum": ["generate-systemd", "generate-docker", "deploy", "status", "rotate-secrets", "ci", "audit"]},
+        "service": {"type": "string", "default": "trading-loop"},
+        "env": {"type": "string", "enum": ["paper", "prod"], "default": "paper"},
+        "target": {"type": "string", "enum": ["systemd", "docker"], "default": "systemd"},
+        "keys": {"type": "string"},
+        "pipeline": {"type": "string", "default": "test"},
+        "static": {"type": "boolean", "default": true}
+      },
+      "output_schema": {
+        "success": "boolean",
+        "artifacts": "array",
+        "audit_report": "object"
+      },
+      "context_reads": ["metadata.environment", "pipeline.*", "health.*"],
+      "context_writes": [],
+      "timeouts": {"generate": 5, "deploy": 30, "audit": 60},
+      "feature_flag": "deployment_enabled"
+    }
+  },
+  "global_config": {
+    "context_file": "data/agent-context.json",
+    "lock_file": "data/agent-context.lock",
+    "signal_log": "data/signal_log.json",
+    "backtest_dir": "data/backtests/",
+    "default_interval_min": 15,
+    "max_concurrent_agents": 4,
+    "agent_timeout_default": 30
+  }
+}
