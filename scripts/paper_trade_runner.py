@@ -470,6 +470,11 @@ def run_simulation(args):
                     logger.info(f"  [BAR {bar_idx}] {pair}: REJECTED — {reason}")
                 continue
 
+            if any(t.get("pair") == pair for t in open_trades):
+                if args.verbose:
+                    logger.info(f"  [BAR {bar_idx}] {pair}: SKIP — position already open")
+                continue
+
             direction = "long" if (recommendation == "BUY" or spot_long_only) else "short"
             trade_id = ledger.open_trade(
                 pair=pair,
